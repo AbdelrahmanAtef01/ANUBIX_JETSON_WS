@@ -5,13 +5,21 @@ ANUBIX Spectrometer Stack - ROS 2 Node
 Subscribes to: /supervisor/spectral_target (std_msgs/String)
                /supervisor/force_stop (std_msgs/Bool)
 Publishes to:  /spectrometer/status (std_msgs/String)
+               /spectrometer/result (std_msgs/String)  JSON — on success only
 
 Status values: reading | applying_ML | uploading | success | failure
 
-Integrates the SpectrometerPipeline driver with ROS 2 topics.
+/spectrometer/result JSON schema:
+  { "task_type": str, "value": float, "classification": str,
+    "confidence": float, "details": dict, "timestamp": float }
+
+The anubix_supabase_uploader node subscribes to /spectrometer/result
+and uploads to Supabase whenever a successful analysis completes.
 """
 
 import os
+import json
+import time
 import threading
 
 import rclpy
@@ -86,8 +94,9 @@ class SpectrometerNode(Node):
         self.create_subscription(
             Bool, '/supervisor/force_stop', self._on_force_stop, cmd_qos)
 
-        # Publisher
+        # Publishers
         self._status_pub = self.create_publisher(String, '/spectrometer/status', pub_qos)
+        self._result_pub = self.create_publisher(String, '/spectrometer/result', pub_qos)
 
         # Initialize pipeline
         device = None
@@ -156,6 +165,18 @@ class SpectrometerNode(Node):
                     f'[SPECTRO] Result: {result.classification} '
                     f'(confidence={result.confidence:.2%}, '
                     f'details={result.details})')
+                # Publish full result JSON so the Supabase uploader can react
+                result_payload = json.dumps({
+                    'task_type': result.task_type,
+                    'value': result.value,
+                    'classification': result.classification,
+                    'confidence': result.confidence,
+                    'details': result.details,
+                    'timestamp': time.time(),
+                }, separators=(',', ':'))
+                self._result_pub.publish(String(data=result_payload))
+                self.get_logger().info(
+                    '[SPECTRO] Published result to /spectrometer/result')
             else:
                 self.get_logger().error(f'[SPECTRO] Pipeline failed for {task_type}')
         except Exception as e:

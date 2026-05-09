@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>anubix_supabase</name>
+  <version>1.0.0</version>
+  <description>Supabase uploader node — triggered by /spectrometer/result, inserts spectral analysis readings into the Supabase readings table with retry logic</description>
+  <maintainer email="anubix@example.com">ANUBIX Team</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

@@ -81,7 +81,7 @@ rosdep update
 # ── 3. Python dependencies ────────────────────────────────────────────────────
 log ""
 log "[3/6] Installing Python dependencies..."
-pip3 install "omnilink>=0.6.0" numpy pyserial \
+pip3 install "omnilink>=0.6.0" numpy pyserial supabase \
     || die "pip install failed"
 
 # ── 4. Build workspace ────────────────────────────────────────────────────────
@@ -99,6 +99,7 @@ colcon build --symlink-install \
         anubix_arm \
         anubix_spectrometer \
         anubix_jetson_bridge \
+        anubix_supabase \
         anubix_bringup \
     2>&1 | tee -a "$LOG_FILE" \
     || die "colcon build failed"

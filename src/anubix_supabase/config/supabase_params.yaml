@@ -1,0 +1,26 @@
+anubix_supabase_uploader:
+  ros__parameters:
+    # ── Robot / mission identity ──────────────────────────────────────────────
+    # UUID of this robot in the Supabase robots table
+    robot_id: "34a957fd-d45c-4dbf-8e02-be8e1b5e349a"
+
+    # UUID of the current task/mission. Update this before each new mission
+    # so readings are grouped correctly in the dashboard.
+    task_id: "40e4060b-5bc8-4044-9d71-046fee27a757"
+
+    # Grid coordinate of the plant being scanned, format "x,y"
+    # Update this before each scan if the robot visits multiple plants.
+    plant_location: "0,0"
+
+    # ── Supabase credentials ──────────────────────────────────────────────────
+    # These are used as fallbacks. Prefer setting env vars on the Jetson:
+    #   export SUPABASE_URL=https://...
+    #   export SUPABASE_KEY=sb_publishable_...
+    supabase_url: "https://bdkutmmrcjckaazzzspe.supabase.co"
+    supabase_key: "sb_publishable_VY6-Jjc6f20Wcbb3Rm8gwg_ZK6CYuh3"
+
+    # ── Retry policy ──────────────────────────────────────────────────────────
+    # How many times to attempt the upload before logging LOST DATA
+    max_retries: 3
+    # Seconds to wait between retry attempts
+    retry_delay_s: 2.0
