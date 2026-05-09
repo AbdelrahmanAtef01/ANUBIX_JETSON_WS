@@ -186,7 +186,8 @@ class AnubixMasterNode(Node):
     def _cb_spectro(self, msg):
         self._fb_spectro = (msg.data or '').strip().lower()
         self.get_logger().info(f'[RX] /spectrometer/status = {self._fb_spectro}')
-        self._ev_spectro.set()
+        if self._fb_spectro in ('success', 'failure'):
+            self._ev_spectro.set()
 
     def _cb_target_pose(self, msg):
         with self._target_pose_lock:

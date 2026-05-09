@@ -1,0 +1,8 @@
+anubix_jetson_bridge:
+  ros__parameters:
+    # IP of the Raspberry Pi on the direct ethernet link
+    rpi_ip: "192.168.10.2"
+    # Heartbeat publish interval (seconds)
+    heartbeat_interval: 1.0
+    # How long without an RPi heartbeat before logging CONNECTION LOST (seconds)
+    connection_timeout: 5.0
