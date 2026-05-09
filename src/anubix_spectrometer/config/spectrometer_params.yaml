@@ -1,0 +1,8 @@
+anubix_spectrometer:
+  ros__parameters:
+    simulate: true
+    serial_port: "/dev/ttyUSB0"
+    baud_rate: 115200
+    num_channels: 257
+    integration_time_ms: 100
+    bg_file: ""  # Leave empty to use the installed bg.csv from package share

@@ -1,0 +1,8 @@
+anubix_master:
+  ros__parameters:
+    omni_key: ""  # Set via OMNI_KEY env var or override here
+    poll_interval: 3.0
+    feedback_timeout: 30.0
+    arm_home_x: 0.0
+    arm_home_y: 0.0
+    arm_home_z: 0.3

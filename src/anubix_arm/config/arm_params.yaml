@@ -1,0 +1,13 @@
+anubix_arm:
+  ros__parameters:
+    simulate: true
+    arm_move_delay: 2.0
+    grip_delay: 1.0
+    # TODO: Arm hardware parameters
+    # arm_controller: "joint_trajectory_controller"
+    # gripper_controller: "gripper_action_controller"
+    # planning_group: "arm"
+    # max_velocity_scaling: 0.5
+    # max_acceleration_scaling: 0.5
+    # touch_sensor_topic: "/touch_sensor/data"
+    # force_threshold: 2.0
