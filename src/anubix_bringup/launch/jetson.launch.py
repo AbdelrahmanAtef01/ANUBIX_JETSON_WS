@@ -3,12 +3,14 @@
 ANUBIX Jetson Launch
 =====================
 Launches only the nodes that run on the Jetson Orin Nano:
-  - anubix_master       (OmniLink AI agent bridge)
-  - anubix_arm          (arm control placeholder)
-  - anubix_spectrometer (spectral analysis)
+  - anubix_master        (OmniLink AI agent bridge)
+  - anubix_arm           (arm control placeholder)
+  - anubix_spectrometer  (spectral analysis)
+  - anubix_vision        (YOLO leaf detection — RealSense + USB cameras)
   - anubix_jetson_bridge (cross-machine link monitor)
+  - anubix_supabase      (Supabase result uploader)
 
-Navigation and Perception run on the Raspberry Pi.
+Navigation runs on the Raspberry Pi.
 Launch those with: ros2 launch anubix_bringup_rpi rpi_full.launch.py
 
 Usage:
@@ -32,6 +34,7 @@ def generate_launch_description():
     master_share   = get_package_share_directory('anubix_master')
     arm_share      = get_package_share_directory('anubix_arm')
     spectro_share  = get_package_share_directory('anubix_spectrometer')
+    vision_share   = get_package_share_directory('anubix_vision')
     bridge_share   = get_package_share_directory('anubix_jetson_bridge')
     supabase_share = get_package_share_directory('anubix_supabase')
 
@@ -62,6 +65,15 @@ def generate_launch_description():
         emulate_tty=True,
     )
 
+    vision_node = Node(
+        package='anubix_vision',
+        executable='vision_node',
+        name='anubix_vision',
+        parameters=[os.path.join(vision_share, 'config', 'vision_params.yaml')],
+        output='screen',
+        emulate_tty=True,
+    )
+
     bridge_node = Node(
         package='anubix_jetson_bridge',
         executable='jetson_bridge_node',
@@ -85,6 +97,7 @@ def generate_launch_description():
         master_node,
         arm_node,
         spectro_node,
+        vision_node,
         bridge_node,
         supabase_node,
     ])

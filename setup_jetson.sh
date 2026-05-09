@@ -81,8 +81,14 @@ rosdep update
 # ── 3. Python dependencies ────────────────────────────────────────────────────
 log ""
 log "[3/6] Installing Python dependencies..."
-pip3 install "omnilink>=0.6.0" numpy pyserial supabase \
+# pyrealsense2 is NOT available on PyPI for arm64 — install from JetPack SDK Manager
+# or build from source: https://github.com/IntelRealSense/librealsense
+pip3 install "omnilink>=0.6.0" numpy pyserial supabase ultralytics \
     || die "pip install failed"
+
+log "  NOTE: pyrealsense2 must be installed separately (not on PyPI for arm64)."
+log "        Install via JetPack SDK Manager or build librealsense from source."
+log "        Camera 1 (RealSense) will be disabled if pyrealsense2 is missing."
 
 # ── 4. Build workspace ────────────────────────────────────────────────────────
 log ""
@@ -98,6 +104,7 @@ colcon build --symlink-install \
         anubix_master \
         anubix_arm \
         anubix_spectrometer \
+        anubix_vision \
         anubix_jetson_bridge \
         anubix_supabase \
         anubix_bringup \

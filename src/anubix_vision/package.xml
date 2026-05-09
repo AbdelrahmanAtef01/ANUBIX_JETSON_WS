@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>anubix_vision</name>
+  <version>0.1.0</version>
+  <description>
+    ANUBIX vision stack — YOLO leaf detection with Intel RealSense (camera 1)
+    and USB mono calibration (camera 2) running on the Jetson Orin Nano.
+  </description>
+  <maintainer email="team@anubix.io">ANUBIX Team</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+
+  <!-- System OpenCV (Jetson ships with CUDA-accelerated cv2) -->
+  <exec_depend>python3-opencv</exec_depend>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
