@@ -58,6 +58,8 @@ class AnubixMasterNode(Node):
         self.declare_parameter('arm_home_x', 0.0)
         self.declare_parameter('arm_home_y', 0.0)
         self.declare_parameter('arm_home_z', 0.3)
+        self.declare_parameter('robot_id', '34a957fd-d45c-4dbf-8e02-be8e1b5e349a')
+        self.declare_parameter('task_id',  '40e4060b-5bc8-4044-9d71-046fee27a757')
 
         omni_key = self.get_parameter('omni_key').value or os.environ.get('OMNI_KEY', '')
         if not omni_key:
@@ -71,6 +73,8 @@ class AnubixMasterNode(Node):
             self.get_parameter('arm_home_y').value,
             self.get_parameter('arm_home_z').value,
         )
+        self._robot_id = self.get_parameter('robot_id').value
+        self._task_id  = self.get_parameter('task_id').value
 
         # OmniLink client
         self.client = OmniLinkClient(omni_key=omni_key, timeout=120)
@@ -320,7 +324,10 @@ class AnubixMasterNode(Node):
         self.get_logger().info(f'[TX] /supervisor/spectral_target {task_type}')
         if not self._ev_spectro.wait(self.feedback_timeout):
             return '/spectrometer/status: failure'
-        return f'/spectrometer/status: {self._fb_spectro}'
+        feedback = f'/spectrometer/status: {self._fb_spectro}'
+        if self._fb_spectro == 'success':
+            feedback += f'\nrobot_id: {self._robot_id}\ntask_id: {self._task_id}'
+        return feedback
 
     # ── OmniLink polling ──────────────────────────────────────────────────────
 

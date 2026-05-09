@@ -2,7 +2,10 @@ anubix_master:
   ros__parameters:
     omni_key: ""  # Set via OMNI_KEY env var or override here
     poll_interval: 3.0
-    feedback_timeout: 30.0
+    feedback_timeout: 120.0
     arm_home_x: 0.0
     arm_home_y: 0.0
     arm_home_z: 0.3
+    # Mission identity — included in OmniLink feedback after spectrometer runs
+    robot_id: "34a957fd-d45c-4dbf-8e02-be8e1b5e349a"
+    task_id: "40e4060b-5bc8-4044-9d71-046fee27a757"
