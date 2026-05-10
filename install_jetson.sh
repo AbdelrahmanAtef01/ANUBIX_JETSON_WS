@@ -28,7 +28,7 @@
 #   ros2 launch anubix_bringup jetson.launch.py
 # =============================================================================
 
-set -uo pipefail
+set -o pipefail
 
 # ── Hardcoded credentials (from project files) ───────────────────────────────
 OMNI_KEY="olink_4ekYIgHACfZaGlq6WJOgu59U"
