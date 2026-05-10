@@ -2,11 +2,15 @@
 
 Run these tests in order after installing on both machines.
 
+**System requirements:**
+- **Raspberry Pi**: Raspberry Pi OS (Debian Bookworm/Trixie) 64-bit
+- **Jetson**: JetPack 5.x / 6.x (Ubuntu 20.04 / 22.04)
+
 ---
 
 ## Phase 0: Pre-Launch Checks
 
-### On Raspberry Pi
+### On Raspberry Pi (Raspberry Pi OS / Debian)
 
 ```bash
 # 1. Verify environment is loaded
@@ -517,6 +521,52 @@ result = client.table('readings').select('*').limit(1).execute()
 print(f"Supabase connection OK, found {len(result.data)} rows")
 EOF
 ```
+
+### Raspberry Pi OS specific issues
+
+#### Network config doesn't persist after reboot
+
+```bash
+# Check if dhcpcd is running (Raspberry Pi OS default)
+systemctl status dhcpcd
+
+# Verify dhcpcd config
+cat /etc/dhcpcd.conf | grep -A3 "ANUBIX"
+# Should show:
+# interface eth0
+# static ip_address=192.168.10.2/24
+# nolink
+
+# If missing, manually add:
+sudo nano /etc/dhcpcd.conf
+# Add at the end:
+interface eth0
+static ip_address=192.168.10.2/24
+nolink
+
+# Restart dhcpcd
+sudo systemctl restart dhcpcd
+```
+
+#### ROS 2 packages missing after install
+
+Raspberry Pi OS (Debian) isn't officially supported by ROS 2, but it works using the Ubuntu Jammy repository. If you get dependency errors:
+
+```bash
+sudo apt-get update
+sudo apt-get install -f
+sudo apt-get install --fix-missing
+```
+
+#### pip install fails with "externally-managed-environment"
+
+Debian 12+ (Bookworm/Trixie) requires `--break-system-packages` flag:
+
+```bash
+pip3 install --break-system-packages <package>
+```
+
+The install script handles this automatically.
 
 ---
 
