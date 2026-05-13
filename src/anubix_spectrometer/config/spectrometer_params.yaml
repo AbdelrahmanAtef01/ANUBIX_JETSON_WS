@@ -11,15 +11,27 @@ anubix_spectrometer:
     host: "192.168.137.2"
     read_port: 5001
     write_port: 5000
-    num_channels: 257             # picks commonWavNum=3 (spec §2.1)
+    num_channels: 257             # picks commonWaveNum=POINTS257 (spec §2.1)
 
-    # runPSD scan settings (spec §2.2.4)
-    integration_time_ms: 100      # scanTime, clamped to [10, 224]
-    zero_padding: 2               # 1=8k, 2=16k, 3=32k FFT points
-    optical_gain: 0               # 0=use sensor-saved gain, 1=calc, 2=ext
-    apodization: 2                # 0=Boxcar 1=Gaussian 2=Happ-Genzel 3=Lorenz
+    # ── runPSD scan settings — MUST match pyConnect (1).py ─────────────
+    # bg.csv and the remote ML model were both trained against these
+    # exact parameters. Changing any of them silently invalidates the
+    # whole pipeline.
+    scan_time_ms: 2000            # pyConnect: scan_time_seconds=2 → 2000ms
+    zero_padding: 3               # POINTS32K
+    optical_gain: 0               # INTERNAL (sensor-saved gain)
+    apodization: 0                # BOXCAR
 
     verbose_debug: true           # hex-dump every TX/RX packet (turn off in prod)
     connect_timeout_s: 5.0
-    read_timeout_s: 15.0          # raised: runPSD response is ~64 KB
+    read_timeout_s: 15.0          # runPSD response is ~64 KB at 2000ms scan
+
     bg_file: ""                   # empty = use installed bg.csv from package share
+
+    # ── Multi-read + remote ML ─────────────────────────────────────────
+    # pyConnect takes 5 scans, means them, divides by bg.csv, rounds to
+    # 8 decimals, then POSTs to the cloud ML endpoint. The local mock
+    # analyzer has been removed — the remote URL is mandatory.
+    num_reads: 5
+    ml_server_url: "http://16.171.254.109:5000/predict"
+    ml_timeout_s: 10.0

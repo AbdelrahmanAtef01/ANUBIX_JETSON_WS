@@ -2,31 +2,28 @@
 """
 ANUBIX Spectrometer Driver — Si-NIR sensor over TCP/IP
 =======================================================
-Implements the Si-NIR Communication Service rev 1 wire protocol over the
-sensor's USB-Ethernet gadget (default 192.168.137.2, write=5000, read=5001),
-then layers the bench-tested dark-current subtraction + crop-health analysis
-on top of it.
+Mirrors pyConnect (1).py byte-for-byte and math-for-math. The reference
+script is the canonical pipeline that the remote ML server was trained
+against; deviating from its parameters or post-processing makes the
+model output garbage. Anything that diverges from pyConnect is a bug.
 
-Supported task types:
-  - water_stress:    NDVI-based water stress index from reflectance
-  - disease:         Spectral signature matching for plant disease
-  - harvest_status:  Chlorophyll/carotenoid ratio for ripeness
-
-Si-NIR wire protocol (see Si-NIR_Communication_Service_r1.pdf):
-  TX command   = u32 length=192 + 48 × i32 little-endian fields
-                 (operation, resolution, mode, zeroPadding, scanTime,
-                  commonWavNum, opticalGain, apodizationSel,
-                  GeneralData[40])
-  RX runPSD    = u32 status + u32 length
-                 + i64 PSD[4096] + i64 Wavenumber[4096]
-                 PSD /= 2**33,   Wavenumber /= 2**30
-The user reports minor doc inaccuracies, so the driver logs full hex dumps
-of every TX/RX and also reports the first PSD samples interpreted as BOTH
-int64/2**33 (per spec) and float64 (so a wrong-type guess is visible).
-
-Usage standalone:
-    python3 spectrometer_driver.py --task water_stress
-    python3 spectrometer_driver.py --host 192.168.137.2 --task disease
+Reference flow (per acquisition):
+  1) check_board                                                       (op 2)
+  2) set_gain_settings   (defaults; sensor always replies 0)           (op 27)
+  3) set_source_settings (lamp warm-up packed into calibrationWells)   (op 22)
+  4) read_module_id      (informational)                               (op 1)
+  5) For i in 1..5:
+        run_psd                                                        (op 3)
+          scanTime=2000, zeroPadding=POINTS32K(3),
+          commonWaveNum=POINTS257(3), opticalGain=INTERNAL(0),
+          apodization=BOXCAR(0).
+        Dequantize:  PSD = (i64 / 2**33) * 100   (NOTE the *100)
+                     WN  =  i64 / 2**30
+  6) psd_mean = np.mean(np.vstack(all_5_psd), axis=0)
+  7) bg = bg.csv['Psd']
+     normalized_psd = np.round(psd_mean / bg, 8)
+  8) POST {"features": normalized_psd.tolist()} to remote ML server.
+     Parse result["prediction"] as the diagnosis string.
 """
 
 import os
@@ -37,10 +34,12 @@ import struct
 import logging
 import argparse
 import threading
-import numpy as np
-from pathlib import Path
 from dataclasses import dataclass
-from typing import Optional, Tuple, List
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+import numpy as np
+import requests
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,8 +56,9 @@ log = logging.getLogger("spectrometer")
 @dataclass
 class SpectralReading:
     wavelengths: np.ndarray
-    raw_psd: np.ndarray
-    corrected_psd: np.ndarray
+    raw_psd_stack: np.ndarray
+    psd_mean: np.ndarray
+    normalized_psd: np.ndarray
     timestamp: float
 
 
@@ -72,11 +72,13 @@ class AnalysisResult:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Background calibration
+# Background calibration (DIVISION-based, matches pyConnect)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class BackgroundCalibration:
-    """Loads and manages the background/dark reference spectrum from bg.csv."""
+    """Loads bg.csv (the reference PSD baseline) and applies the reference
+    normalization: `psd_mean / bg`, rounded to 8 decimals — same as
+    pyConnect."""
 
     def __init__(self, bg_path: str):
         self.wavelengths: np.ndarray = np.array([])
@@ -86,33 +88,30 @@ class BackgroundCalibration:
     def _load(self, path: str):
         wavelengths = []
         psd_values = []
-
         with open(path, 'r') as f:
             reader = csv.DictReader(f)
             for row in reader:
                 wavelengths.append(float(row['Wavelength']))
                 psd_values.append(float(row['Psd']))
-
         self.wavelengths = np.array(wavelengths)
         self.background_psd = np.array(psd_values)
-        log.info(f"[CAL] Loaded background: {len(self.wavelengths)} channels, "
-                 f"range [{self.wavelengths[0]:.1f} - {self.wavelengths[-1]:.1f}]")
+        log.info(
+            f"[CAL] Loaded background: {len(self.wavelengths)} channels, "
+            f"WL range [{self.wavelengths[0]:.1f} - "
+            f"{self.wavelengths[-1]:.1f}]")
 
-    def subtract(self, raw_psd: np.ndarray) -> np.ndarray:
-        """Subtract background from raw reading. Clips negative values to 0."""
-        if len(raw_psd) != len(self.background_psd):
-            log.warning(f"[CAL] Channel mismatch: raw={len(raw_psd)}, "
-                        f"bg={len(self.background_psd)}. Interpolating.")
-            from scipy.interpolate import interp1d
-            interp = interp1d(
-                np.linspace(0, 1, len(self.background_psd)),
-                self.background_psd,
-                kind='linear')
-            bg_resampled = interp(np.linspace(0, 1, len(raw_psd)))
-            corrected = raw_psd - bg_resampled
-        else:
-            corrected = raw_psd - self.background_psd
-        return np.clip(corrected, 0.0, None)
+    def normalize(self, psd_mean: np.ndarray) -> np.ndarray:
+        """Divide mean PSD by background PSD, round to 8 decimals.
+        Element-wise division — matches `normalized_psd = psd_mean /
+        bg_psd_scaled` then `np.round(..., 8)` in pyConnect."""
+        if len(psd_mean) != len(self.background_psd):
+            raise ValueError(
+                f"PSD length {len(psd_mean)} does not match bg.csv length "
+                f"{len(self.background_psd)} — reference assumes 257-pt "
+                f"alignment. Regenerate bg.csv with the same sensor "
+                f"settings (commonWaveNum=POINTS257).")
+        normalized = psd_mean / self.background_psd
+        return np.round(normalized, 8)
 
     @property
     def num_channels(self) -> int:
@@ -120,62 +119,70 @@ class BackgroundCalibration:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Spectrometer hardware interface
+# Spectrometer hardware interface — Si-NIR over TCP/IP
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SpectrometerDevice:
     """
     Interface to the Si-NIR sensor over TCP/IP (spec rev 1).
 
-    The sensor presents itself as a USB-Ethernet gadget at 192.168.137.2
-    with two TCP ports:
-        write_port = 5000  — host → sensor (binary command packets)
-        read_port  = 5001  — sensor → host (binary response packets)
-
-    Command packet (EMPIRICAL — doc says a 4-byte length prefix is sent;
-    actual sensor wants the 48 raw i32 fields with NO length prefix):
-        [48 × i32 LE fields]                           (192 bytes total)
-        fields = operation, resolution, mode, zeroPadding, scanTime,
-                 commonWavNum, opticalGain, apodizationSel, GeneralData[40]
-
-    runPSD (op 3) response (EMPIRICAL — doc claims status:1 for checkBoard
-    but probe shows checkBoard reply is 5 bytes = u32 status + 1-byte pad,
-    so all statuses look like u32):
-        [u32 status][u32 length]
-        [i64 PSD × length][i64 Wavenumber × length]
-        PSD /= 2**33,  Wavenumber /= 2**30
+    Wire framing (empirical, see sinir_probe.py + pyConnect.ResponsePacket):
+        TX command = 48 × i32 little-endian fields              (192 bytes)
+                     [operation, resolution, mode, zeroPadding,
+                      scanTime, commonWaveNum, opticalGain,
+                      apodizationSel, calibrationWells[40]]
+                     NO length prefix on TX.
+        RX         = u32 LE payload_len + payload_len bytes.
+        runPSD     payload = u32 status + u32 length
+                             + i64 PSD[4096] + i64 Wavenumber[4096]
+                             PSD = (i64 / 2**33) * 100,
+                             WN  =  i64 / 2**30.
     """
 
-    # Operation codes (spec §2.2)
+    # Operation codes (spec §2.2, also pyConnect constants)
     OP_READ_MODULE_ID = 1
     OP_CHECK_BOARD = 2
     OP_RUN_PSD = 3
     OP_RUN_BACKGROUND = 4
-    OP_RUN_SPECTRUM = 5
-    OP_READ_SW_VERSION = 14
+    OP_RUN_ABSORBANCE = 5
+    OP_SET_SOURCE_SETTINGS = 22
+    OP_SET_GAIN_SETTINGS = 27
 
+    # Packet layout
     PACKET_NUM_INTS = 48
-    GENERAL_DATA_LEN = 40
+    CALIBRATION_WELLS_LEN = 40
 
-    PSD_BUFFER_SAMPLES = 4096
-    PSD_BUFFER_BYTES = PSD_BUFFER_SAMPLES * 8
-
+    # runPSD response constants
+    MAX_PSD_LENGTH = 4096
+    PSD_BUFFER_BYTES = MAX_PSD_LENGTH * 8
     PSD_DEQUANT = float(1 << 33)
     WN_DEQUANT = float(1 << 30)
+    PSD_POST_SCALE = 100.0  # pyConnect: `(psd / 2**33) * 100`
 
-    # commonWavNum → point count (spec §2.1)
+    # commonWaveNum → point count (spec §2.1)
     COMMON_WAV_POINTS = {0: 0, 1: 65, 2: 129, 3: 257, 4: 513,
                          5: 1024, 6: 2048, 7: 4096}
+
+    # pyConnect.run_set_source_settings values — DO NOT change without
+    # re-collecting bg.csv. The lamp warm-up profile is baked into the
+    # baseline.
+    SRC_LAMPS_COUNT = 2
+    SRC_LAMPS_SELECT = 0
+    SRC_T1 = 14
+    SRC_DELTA_T = 2
+    SRC_T2_C1 = 5
+    SRC_T2_C2 = 35
+    SRC_T2_MAX = 10
 
     def __init__(self,
                  host: str = '192.168.137.2',
                  read_port: int = 5001,
                  write_port: int = 5000,
                  num_channels: int = 257,
-                 integration_time_ms: int = 100,
-                 zero_padding: int = 2,
+                 scan_time_ms: int = 2000,
+                 zero_padding: int = 3,
                  optical_gain: int = 0,
-                 apodization: int = 2,
+                 apodization: int = 0,
                  connect_timeout_s: float = 5.0,
                  read_timeout_s: float = 15.0,
                  verbose_debug: bool = True):
@@ -183,7 +190,11 @@ class SpectrometerDevice:
         self.read_port = int(read_port)
         self.write_port = int(write_port)
         self.num_channels = int(num_channels)
-        self.integration_time_ms = int(integration_time_ms)
+        # NOTE: pyConnect uses scan_time_seconds=2 → scanTime=2000 ms,
+        # which is well past the spec's stated 10..224 range. The sensor
+        # accepts it in practice and the reference relies on it, so we
+        # do NOT clamp. If you want to clamp, regenerate bg.csv first.
+        self._scan_time_ms = int(scan_time_ms)
         self.zero_padding = int(zero_padding)
         self.optical_gain = int(optical_gain)
         self.apodization = int(apodization)
@@ -191,30 +202,24 @@ class SpectrometerDevice:
         self.read_timeout_s = float(read_timeout_s)
         self.verbose = bool(verbose_debug)
 
-        # scanTime allowed range per spec §2.1: 10..224 ms
-        self._scan_time_ms = max(10, min(224, self.integration_time_ms))
-        if self._scan_time_ms != self.integration_time_ms:
-            log.warning(
-                f"[HW] scanTime clamped {self.integration_time_ms}"
-                f"→{self._scan_time_ms} ms (Si-NIR allowed: 10..224)")
-
-        # Pick commonWavNum that matches the configured channel count
+        # Pick commonWaveNum that matches the configured channel count
         self._common_wav_num = next(
             (c for c, n in self.COMMON_WAV_POINTS.items()
              if n == self.num_channels),
-            3,
+            3,  # default to POINTS257
         )
         chosen_n = self.COMMON_WAV_POINTS.get(self._common_wav_num)
         if chosen_n != self.num_channels:
             log.warning(
                 f"[HW] num_channels={self.num_channels} has no exact "
-                f"commonWavNum match; using commonWavNum="
-                f"{self._common_wav_num} ({chosen_n} pts)")
+                f"commonWaveNum match; using commonWaveNum="
+                f"{self._common_wav_num} ({chosen_n} pts) — bg.csv "
+                f"must match.")
 
         self._read_sock: Optional[socket.socket] = None
         self._write_sock: Optional[socket.socket] = None
         self._lock = threading.Lock()
-        self.last_wavenumber: Optional[np.ndarray] = None
+        self.last_wavelength: Optional[np.ndarray] = None
 
     # ────────────────── socket lifecycle ──────────────────
 
@@ -239,9 +244,13 @@ class SpectrometerDevice:
         return s
 
     def connect(self):
-        """Open both sockets and best-effort identify the sensor."""
-        # Open READ first — the sensor likely expects the read channel
-        # ready before it processes a command on the write channel.
+        """Open both sockets and run the reference startup sequence:
+        check_board → set_gain_settings → set_source_settings →
+        read_module_id. pyConnect does these unconditionally on every
+        boot; skipping any of them changes the lamp behaviour and the
+        readings drift away from bg.csv."""
+        # READ first — sensor expects the read channel ready before it
+        # processes a command on the write channel.
         self._read_sock = self._open_sock(self.read_port, "READ")
         try:
             self._write_sock = self._open_sock(self.write_port, "WRITE")
@@ -256,22 +265,28 @@ class SpectrometerDevice:
 
         self._drain_read_buffer(max_bytes=256, timeout=0.3)
 
-        # Probe operations. Log everything; do NOT fail connect on a probe
-        # mismatch — the user warned the doc has minor inaccuracies, so we
-        # want the per-operation truth in the terminal even if a probe is
-        # slightly off.
+        # Startup sequence — match pyConnect order exactly.
+        try:
+            st = self.check_board()
+            log.info(f"[HW] checkBoard → status_byte=0x{st:02x}")
+        except Exception as e:
+            log.warning(f"[HW] checkBoard skipped: {e!r}")
+
+        try:
+            self.set_gain_settings()
+        except Exception as e:
+            log.warning(f"[HW] setGainSettings skipped: {e!r}")
+
+        try:
+            self.set_source_settings()
+        except Exception as e:
+            log.warning(f"[HW] setSourceSettings skipped: {e!r}")
+
         try:
             mid = self.read_module_id()
             log.info(f"[HW] Module ID: {mid!r}")
         except Exception as e:
             log.warning(f"[HW] readModuleID skipped: {e!r}")
-
-        try:
-            st = self.check_board()
-            log.info(f"[HW] checkBoard status=0x{st:02x} "
-                     f"({'READY' if st == 1 else 'NOT-READY/UNKNOWN'})")
-        except Exception as e:
-            log.warning(f"[HW] checkBoard skipped: {e!r}")
 
     def disconnect(self):
         for attr in ('_read_sock', '_write_sock'):
@@ -306,23 +321,23 @@ class SpectrometerDevice:
                       zero_padding: int = 0, scan_time: int = 0,
                       common_wav_num: int = 0, optical_gain: int = 0,
                       apodization_sel: int = 0,
-                      general_data: Optional[List[int]] = None) -> bytes:
-        # NOTE: spec §2.2.1 says a 4-byte length prefix precedes every
-        # command. EMPIRICALLY (sinir_probe.py) the sensor only replies
-        # when the prefix is omitted — variant C is the only one that
-        # gets bytes back. So we send the 48 i32 fields raw.
-        gd = list(general_data or [])
-        gd = (gd + [0] * self.GENERAL_DATA_LEN)[:self.GENERAL_DATA_LEN]
+                      calibration_wells: Optional[List[int]] = None) -> bytes:
+        cw = list(calibration_wells or [])
+        cw = (cw + [0] * self.CALIBRATION_WELLS_LEN)[:self.CALIBRATION_WELLS_LEN]
         fields = [operation, resolution, mode, zero_padding, scan_time,
-                  common_wav_num, optical_gain, apodization_sel] + gd
-        pkt = struct.pack(f"<{self.PACKET_NUM_INTS}i", *fields)
+                  common_wav_num, optical_gain, apodization_sel] + cw
+        # Reference packs as `<8I 40I` (UNSIGNED). Match exactly — all
+        # our field values are non-negative, so signed vs unsigned
+        # produces identical bytes today, but the reference is the
+        # source of truth.
+        pkt = struct.pack(f"<{self.PACKET_NUM_INTS}I", *fields)
         if self.verbose:
             log.info(
                 f"[HW] TX op={operation} "
                 f"(res={resolution} mode={mode} zp={zero_padding} "
                 f"scan={scan_time}ms cwn={common_wav_num} "
                 f"gain={optical_gain} apod={apodization_sel}) "
-                f"pkt={len(pkt)}B (no length prefix — empirical)")
+                f"pkt={len(pkt)}B")
             log.info(f"[HW] TX bytes: {self._hex(pkt)}")
         return pkt
 
@@ -383,12 +398,6 @@ class SpectrometerDevice:
             log.warning(f"[HW] Drained {len(drained)} stale bytes: "
                         f"{self._hex(bytes(drained))}")
 
-    # ────────────────── response framing ──────────────────
-    # Empirical (sinir_probe.py variant C):
-    #   checkBoard TX = 192B raw fields (no length prefix)
-    #   checkBoard RX = 01000000 00 = [u32 resp_len=1][payload 1 byte]
-    # So all responses are: [u32 LE payload_length][payload_length bytes]
-
     def _recv_response(self, label: str) -> bytes:
         """Read a framed response: [u32 LE payload_len][payload bytes]."""
         hdr = self._read_exact(4, label=f"{label}-resp-len")
@@ -407,7 +416,7 @@ class SpectrometerDevice:
     # ────────────────── operations ──────────────────
 
     def check_board(self) -> int:
-        """Op 2: 0=OK/connected (per spec description), non-zero=error."""
+        """Op 2: 0=OK/connected (per spec), non-zero=error."""
         with self._lock:
             self._send(self._build_packet(self.OP_CHECK_BOARD))
             payload = self._recv_response("checkBoard")
@@ -416,8 +425,42 @@ class SpectrometerDevice:
                  f"status_byte=0x{status:02x}")
         return status
 
+    def set_gain_settings(self) -> int:
+        """Op 27: pyConnect sends an all-zero packet; sensor always
+        replies 0. Just clears the response buffer so subsequent ops
+        line up."""
+        with self._lock:
+            self._send(self._build_packet(self.OP_SET_GAIN_SETTINGS))
+            payload = self._recv_response("setGainSettings")
+        result = int.from_bytes(payload, 'little') if payload else 0
+        log.info(f"[HW] setGainSettings result={result}")
+        return result
+
+    def set_source_settings(self) -> int:
+        """Op 22: configure lamp warm-up. Reference packs three values
+        into calibrationWells[0..2]:
+            [0] = lampsCount | (lampsSelect << 8)            (2)
+            [1] = t1         | (deltaT << 8)                 (526)
+            [2] = t2C1       | (t2C2 << 8) | (t2max << 16)   (664325)
+        These exact numbers were used when bg.csv was collected — do
+        not change them."""
+        cw = [0] * self.CALIBRATION_WELLS_LEN
+        cw[0] = self.SRC_LAMPS_COUNT | (self.SRC_LAMPS_SELECT << 8)
+        cw[1] = self.SRC_T1 | (self.SRC_DELTA_T << 8)
+        cw[2] = (self.SRC_T2_C1 | (self.SRC_T2_C2 << 8)
+                 | (self.SRC_T2_MAX << 16))
+        with self._lock:
+            self._send(self._build_packet(
+                self.OP_SET_SOURCE_SETTINGS,
+                calibration_wells=cw))
+            payload = self._recv_response("setSourceSettings")
+        result = int.from_bytes(payload, 'little') if payload else 0
+        log.info(f"[HW] setSourceSettings result={result} "
+                 f"(wells[0..2]={cw[0]},{cw[1]},{cw[2]})")
+        return result
+
     def read_module_id(self) -> str:
-        """Op 1: null-terminated module ID string (up to 21 bytes)."""
+        """Op 1: null-terminated module ID string."""
         with self._lock:
             self._send(self._build_packet(self.OP_READ_MODULE_ID))
             payload = self._recv_response("readModuleID")
@@ -425,10 +468,15 @@ class SpectrometerDevice:
         text = payload[:end] if end >= 0 else payload
         return text.decode('ascii', errors='replace').strip()
 
-    def read_spectrum(self) -> np.ndarray:
-        """Op 3 (runPSD): one scan, dequantized PSD as float64."""
+    def read_spectrum(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Op 3 (runPSD): one scan. Returns (psd, wavelength), both
+        dequantized exactly the way pyConnect does it:
+            psd = (i64 / 2**33) * 100
+            wn  =  i64 / 2**30
+        """
         if not self.is_connected:
-            raise ConnectionError("Si-NIR not connected; call connect() first")
+            raise ConnectionError(
+                "Si-NIR not connected; call connect() first")
 
         pkt = self._build_packet(
             operation=self.OP_RUN_PSD,
@@ -444,17 +492,17 @@ class SpectrometerDevice:
         with self._lock:
             t0 = time.time()
             self._send(pkt)
-            log.info(f"[HW] runPSD sent; awaiting response "
-                     f"(scanTime={self._scan_time_ms}ms, "
-                     f"timeout={self.read_timeout_s:.1f}s)")
+            log.info(
+                f"[HW] runPSD sent; awaiting response "
+                f"(scanTime={self._scan_time_ms}ms, "
+                f"timeout={self.read_timeout_s:.1f}s)")
 
-            # Response framing: [u32 resp_len][payload]
-            # Payload for runPSD: [u32 status][u32 data_length][PSD][WN]
+            # Outer framing: [u32 resp_len][payload]
+            # Payload: [u32 status][u32 length][PSD 4096×i64][WN 4096×i64]
             resp_hdr = self._read_exact(4, label="runPSD-resp-len")
             resp_len = struct.unpack("<I", resp_hdr)[0]
             log.info(f"[HW] runPSD response_len={resp_len} bytes")
 
-            # Read status + data_length from inside the payload
             inner_hdr = self._read_exact(8, label="runPSD-status+length")
             status, length = struct.unpack("<II", inner_hdr)
             log.info(f"[HW] runPSD → status=0x{status:08x} "
@@ -478,7 +526,7 @@ class SpectrometerDevice:
                                         label="runPSD-WN")
             elapsed = time.time() - t0
 
-        if length <= 0 or length > self.PSD_BUFFER_SAMPLES:
+        if length <= 0 or length > self.MAX_PSD_LENGTH:
             log.warning(
                 f"[HW] data_length={length} outside valid range; "
                 f"falling back to num_channels={self.num_channels}")
@@ -486,267 +534,61 @@ class SpectrometerDevice:
 
         psd_q = np.frombuffer(psd_bytes, dtype='<i8')[:length]
         wn_q = np.frombuffer(wn_bytes, dtype='<i8')[:length]
-        psd = psd_q.astype(np.float64) / self.PSD_DEQUANT
+        # ── pyConnect dequantization (EXACT) ──
+        psd = (psd_q.astype(np.float64) / self.PSD_DEQUANT) * self.PSD_POST_SCALE
         wn = wn_q.astype(np.float64) / self.WN_DEQUANT
-        self.last_wavenumber = wn
+        self.last_wavelength = wn
 
-        log.info(f"[HW] runPSD parsed in {elapsed*1000:.0f}ms: "
-                 f"{length} samples, "
-                 f"PSD range=[{psd.min():.4e}, {psd.max():.4e}], "
-                 f"WN range=[{wn.min():.1f}, {wn.max():.1f}] cm-1")
+        log.info(
+            f"[HW] runPSD parsed in {elapsed*1000:.0f}ms: "
+            f"{length} samples, "
+            f"PSD range=[{psd.min():.4e}, {psd.max():.4e}], "
+            f"WN range=[{wn.min():.1f}, {wn.max():.1f}]")
 
-        if self.verbose and length >= 3:
-            mid = length // 2
-            psd_dbl = np.frombuffer(psd_bytes, dtype='<f8')[:length]
-            wn_dbl = np.frombuffer(wn_bytes, dtype='<f8')[:length]
-            log.info(
-                f"[HW] PSD[0,{mid},-1] as int64/2**33: "
-                f"{psd[0]:.4e} {psd[mid]:.4e} {psd[-1]:.4e}")
-            log.info(
-                f"[HW] PSD[0,{mid},-1] as float64    : "
-                f"{psd_dbl[0]:.4e} {psd_dbl[mid]:.4e} {psd_dbl[-1]:.4e}")
-            log.info(
-                f"[HW] WN [0,{mid},-1] as int64/2**30: "
-                f"{wn[0]:.1f} {wn[mid]:.1f} {wn[-1]:.1f}")
-            log.info(
-                f"[HW] WN [0,{mid},-1] as float64    : "
-                f"{wn_dbl[0]:.1f} {wn_dbl[mid]:.1f} {wn_dbl[-1]:.1f}")
-
-        return psd
+        return psd, wn
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Spectral analysis engine
+# Remote ML client
 # ─────────────────────────────────────────────────────────────────────────────
 
-class SpectralAnalyzer:
-    """
-    Processes calibrated spectra and classifies crop health.
+class RemoteMLClient:
+    """POST a 257-point normalized PSD to the remote ML server and parse
+    the diagnosis string. The server is the only ground truth — there
+    is no local fallback classifier."""
 
-    Implements three analysis modes:
-      - water_stress:    Based on Water Band Index (WBI) and NDVI
-      - disease:         Spectral angle mapping against disease signatures
-      - harvest_status:  Chlorophyll/carotenoid ratio analysis
-    """
+    def __init__(self, server_url: str, timeout_s: float = 10.0):
+        if not server_url:
+            raise ValueError(
+                "ml_server_url is empty — remote ML is mandatory, no "
+                "local fallback. Set the ml_server_url parameter.")
+        self.server_url = server_url
+        self.timeout_s = float(timeout_s)
 
-    def __init__(self, wavelengths: np.ndarray):
-        self.wavelengths = wavelengths
-        self._wl_min = wavelengths[0]
-        self._wl_max = wavelengths[-1]
-        self._wl_step = (self._wl_max - self._wl_min) / (len(wavelengths) - 1)
-
-    def _wl_to_idx(self, target_wl: float) -> int:
-        """Convert wavelength to nearest channel index."""
-        idx = int(round((target_wl - self._wl_min) / self._wl_step))
-        return max(0, min(idx, len(self.wavelengths) - 1))
-
-    def _band_mean(self, spectrum: np.ndarray, center_wl: float,
-                   width: float = 20.0) -> float:
-        """Mean reflectance in a band centered at center_wl with given width."""
-        idx_lo = self._wl_to_idx(center_wl - width / 2)
-        idx_hi = self._wl_to_idx(center_wl + width / 2)
-        if idx_lo >= idx_hi:
-            return float(spectrum[idx_lo])
-        return float(np.mean(spectrum[idx_lo:idx_hi + 1]))
-
-    def analyze(self, spectrum: np.ndarray, task_type: str) -> AnalysisResult:
-        """Run analysis for the specified task type."""
-        if task_type == 'water_stress':
-            return self._analyze_water_stress(spectrum)
-        elif task_type == 'disease':
-            return self._analyze_disease(spectrum)
-        elif task_type == 'harvest_status':
-            return self._analyze_harvest(spectrum)
-        else:
-            log.warning(f"[ANALYSIS] Unknown task type: {task_type}")
-            return AnalysisResult(
-                task_type=task_type,
-                value=0.0,
-                classification='unknown',
-                confidence=0.0,
-                details={'error': f'unsupported task type: {task_type}'}
-            )
-
-    def _analyze_water_stress(self, spectrum: np.ndarray) -> AnalysisResult:
-        """
-        Water stress detection using spectral vegetation indices.
-
-        Uses:
-          - NDVI (Normalized Difference Vegetation Index)
-          - WBI  (Water Band Index) if NIR range available
-          - PRI  (Photochemical Reflectance Index)
-        """
-        # Compute indices based on available wavelength range
-        # Map to relative positions in the spectrum
-        n = len(spectrum)
-
-        # Red region (~670nm equivalent) and NIR (~800nm equivalent)
-        red_idx = int(n * 0.45)
-        nir_idx = int(n * 0.65)
-
-        red_band = float(np.mean(spectrum[max(0, red_idx - 3):red_idx + 3]))
-        nir_band = float(np.mean(spectrum[max(0, nir_idx - 3):nir_idx + 3]))
-
-        # NDVI
-        if (nir_band + red_band) > 0:
-            ndvi = (nir_band - red_band) / (nir_band + red_band)
-        else:
-            ndvi = 0.0
-
-        # Green band for PRI approximation
-        green_idx = int(n * 0.25)
-        green_band = float(np.mean(spectrum[max(0, green_idx - 3):green_idx + 3]))
-
-        # Water stress index (simplified)
-        # Healthy vegetation: NDVI > 0.6
-        # Mild stress: 0.3 < NDVI < 0.6
-        # Severe stress: NDVI < 0.3
-        if ndvi > 0.6:
-            classification = 'healthy'
-            stress_level = 0.0
-        elif ndvi > 0.4:
-            classification = 'mild_stress'
-            stress_level = 0.4
-        elif ndvi > 0.2:
-            classification = 'moderate_stress'
-            stress_level = 0.7
-        else:
-            classification = 'severe_stress'
-            stress_level = 1.0
-
-        confidence = min(1.0, abs(ndvi) * 1.5 + 0.3)
-
-        return AnalysisResult(
-            task_type='water_stress',
-            value=stress_level,
-            classification=classification,
-            confidence=confidence,
-            details={
-                'ndvi': round(ndvi, 4),
-                'red_reflectance': round(red_band, 4),
-                'nir_reflectance': round(nir_band, 4),
-                'green_reflectance': round(green_band, 4),
-            }
-        )
-
-    def _analyze_disease(self, spectrum: np.ndarray) -> AnalysisResult:
-        """
-        Disease detection using spectral signature analysis.
-
-        Compares the spectrum against known disease signatures using
-        spectral angle mapping (SAM) and band ratio analysis.
-        """
-        n = len(spectrum)
-
-        # Key diagnostic bands for plant disease:
-        # - Blue absorption (chlorosis indicator)
-        # - Red edge shift (stress indicator)
-        # - Green reflectance peak changes
-        blue_idx = int(n * 0.1)
-        green_idx = int(n * 0.25)
-        red_idx = int(n * 0.45)
-        red_edge_idx = int(n * 0.55)
-        nir_idx = int(n * 0.7)
-
-        blue_band = float(np.mean(spectrum[max(0, blue_idx - 2):blue_idx + 2]))
-        green_band = float(np.mean(spectrum[max(0, green_idx - 2):green_idx + 2]))
-        red_band = float(np.mean(spectrum[max(0, red_idx - 2):red_idx + 2]))
-        red_edge = float(np.mean(spectrum[max(0, red_edge_idx - 2):red_edge_idx + 2]))
-        nir_band = float(np.mean(spectrum[max(0, nir_idx - 2):nir_idx + 2]))
-
-        # Disease indicators:
-        # 1. Red edge position shift (blue shift = stressed)
-        # 2. Increased red reflectance (less chlorophyll absorption)
-        # 3. Decreased NIR reflectance (cell structure damage)
-        red_edge_ratio = red_edge / (red_band + 1e-6)
-        nir_red_ratio = nir_band / (red_band + 1e-6)
-        chlorophyll_index = (nir_band - red_edge) / (nir_band + red_edge + 1e-6)
-
-        # Classification thresholds
-        disease_score = 0.0
-        if red_edge_ratio < 1.3:
-            disease_score += 0.3
-        if nir_red_ratio < 2.0:
-            disease_score += 0.4
-        if chlorophyll_index < 0.1:
-            disease_score += 0.3
-
-        if disease_score < 0.3:
-            classification = 'healthy'
-        elif disease_score < 0.6:
-            classification = 'early_stage'
-        else:
-            classification = 'infected'
-
-        confidence = 0.5 + disease_score * 0.4
-
-        return AnalysisResult(
-            task_type='disease',
-            value=disease_score,
-            classification=classification,
-            confidence=confidence,
-            details={
-                'red_edge_ratio': round(red_edge_ratio, 4),
-                'nir_red_ratio': round(nir_red_ratio, 4),
-                'chlorophyll_index': round(chlorophyll_index, 4),
-                'disease_score': round(disease_score, 4),
-            }
-        )
-
-    def _analyze_harvest(self, spectrum: np.ndarray) -> AnalysisResult:
-        """
-        Harvest readiness assessment.
-
-        Uses chlorophyll degradation and carotenoid accumulation
-        as indicators of fruit/crop ripeness.
-        """
-        n = len(spectrum)
-
-        # Relevant bands:
-        # - Blue/violet: carotenoid absorption
-        # - Green: chlorophyll reflectance
-        # - Red: chlorophyll absorption
-        # - Red edge: structural change indicator
-        blue_idx = int(n * 0.1)
-        green_idx = int(n * 0.25)
-        red_idx = int(n * 0.45)
-        nir_idx = int(n * 0.65)
-
-        blue_band = float(np.mean(spectrum[max(0, blue_idx - 2):blue_idx + 2]))
-        green_band = float(np.mean(spectrum[max(0, green_idx - 2):green_idx + 2]))
-        red_band = float(np.mean(spectrum[max(0, red_idx - 2):red_idx + 2]))
-        nir_band = float(np.mean(spectrum[max(0, nir_idx - 2):nir_idx + 2]))
-
-        # Ripeness indicators:
-        # As fruit ripens: chlorophyll decreases (green goes down, red goes up)
-        # Carotenoids increase (blue absorption changes)
-        green_red_ratio = green_band / (red_band + 1e-6)
-        ndvi = (nir_band - red_band) / (nir_band + red_band + 1e-6)
-
-        # Ripeness score: low green/red ratio + lower NDVI = more ripe
-        ripeness_score = 1.0 - (green_red_ratio * 0.5 + ndvi * 0.3)
-        ripeness_score = max(0.0, min(1.0, ripeness_score))
-
-        if ripeness_score > 0.7:
-            classification = 'ready'
-        elif ripeness_score > 0.4:
-            classification = 'nearly_ready'
-        else:
-            classification = 'not_ready'
-
-        confidence = 0.6 + abs(ripeness_score - 0.5) * 0.6
-
-        return AnalysisResult(
-            task_type='harvest_status',
-            value=ripeness_score,
-            classification=classification,
-            confidence=confidence,
-            details={
-                'green_red_ratio': round(green_red_ratio, 4),
-                'ndvi': round(ndvi, 4),
-                'ripeness_score': round(ripeness_score, 4),
-            }
-        )
+    def predict(self, features: np.ndarray) -> dict:
+        payload = {"features": features.tolist()}
+        log.info(
+            f"[ML] POST {self.server_url} "
+            f"features={len(payload['features'])}-pt "
+            f"timeout={self.timeout_s:.1f}s")
+        resp = requests.post(self.server_url, json=payload,
+                             timeout=self.timeout_s)
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"ML server HTTP {resp.status_code}: {resp.text[:200]!r}")
+        result = resp.json()
+        if result.get("status") != "success":
+            raise RuntimeError(
+                f"ML server returned non-success status: "
+                f"{result.get('status')!r} message="
+                f"{result.get('message')!r}")
+        prediction = result.get("prediction")
+        if prediction is None:
+            raise RuntimeError(
+                f"ML server response missing 'prediction' field: "
+                f"{result!r}")
+        log.info(f"[ML] prediction={prediction!r}")
+        return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -755,29 +597,37 @@ class SpectralAnalyzer:
 
 class SpectrometerPipeline:
     """
-    Complete spectrometer pipeline: acquire -> calibrate -> analyze -> report.
+    Complete spectrometer pipeline: read 5 → mean → divide by bg →
+    round → POST to remote ML → publish.
 
-    Stages published as status:
-      1. "reading"      - Acquiring data from sensor
-      2. "applying_ML"  - Running spectral analysis
-      3. "uploading"    - Preparing results (or uploading to cloud)
-      4. "success"      - Pipeline complete with results
-      5. "failure"      - Error during any stage
+    Stages emitted as status:
+        reading      — acquiring 5 scans
+        applying_ML  — normalizing + POSTing to remote model
+        uploading    — handoff to /spectrometer/result subscribers
+        success | failure
     """
 
-    def __init__(self, bg_path: str, device: 'SpectrometerDevice'):
+    DEFAULT_ML_URL = "http://16.171.254.109:5000/predict"
+    DEFAULT_NUM_READS = 5
+
+    def __init__(self,
+                 bg_path: str,
+                 device: SpectrometerDevice,
+                 ml_server_url: str = DEFAULT_ML_URL,
+                 ml_timeout_s: float = 10.0,
+                 num_reads: int = DEFAULT_NUM_READS):
         if device is None:
             raise ValueError(
-                "SpectrometerPipeline requires a SpectrometerDevice instance")
+                "SpectrometerPipeline requires a SpectrometerDevice")
         self.calibration = BackgroundCalibration(bg_path)
         self.device = device
-        self.analyzer = SpectralAnalyzer(self.calibration.wavelengths)
+        self.ml_client = RemoteMLClient(ml_server_url, ml_timeout_s)
+        self.num_reads = max(1, int(num_reads))
         self._status_callback = None
         self._last_reading: Optional[SpectralReading] = None
         self._last_result: Optional[AnalysisResult] = None
 
     def set_status_callback(self, callback):
-        """Set callback(status_string) for stage updates."""
         self._status_callback = callback
 
     def _emit_status(self, status: str):
@@ -786,51 +636,99 @@ class SpectrometerPipeline:
             self._status_callback(status)
 
     def connect(self):
-        """Connect to spectrometer hardware."""
         self.device.connect()
 
     def disconnect(self):
-        """Disconnect from spectrometer hardware."""
         self.device.disconnect()
 
-    def run(self, task_type: str) -> Tuple[str, Optional[AnalysisResult]]:
-        """
-        Execute the full spectrometer pipeline for the given task.
+    # ── prediction → classification mapping ─────────────────────────────────
+    # The remote ML server returns a free-form `prediction` string
+    # (pyConnect treats "With Virus" / "Healthy" as the two outcomes).
+    # The supabase_uploader expects `classification ∈ {infected,
+    # early_stage, healthy, ...}`, so we collapse the ML output to those
+    # tokens here — keeping pyConnect's semantics: any mention of
+    # "virus" means infected; anything else is healthy.
+    @staticmethod
+    def _classify(prediction: str) -> Tuple[str, float]:
+        p = (prediction or '').strip()
+        p_low = p.lower()
+        if 'virus' in p_low or 'disease' in p_low or 'infected' in p_low:
+            return 'infected', 1.0
+        return 'healthy', 0.0
 
-        Returns:
-            (final_status, result) where final_status is 'success' or 'failure'
-        """
+    def run(self, task_type: str) -> Tuple[str, Optional[AnalysisResult]]:
+        """Execute the reference pipeline once. Returns (status, result)."""
         try:
-            # Stage 1: Reading
+            # ─── Stage 1: 5-scan acquisition ─────────────────────────
             self._emit_status('reading')
             if not self.device.is_connected:
                 self.device.connect()
-            raw_psd = self.device.read_spectrum()
-            timestamp = time.time()
-            log.info(f"[PIPELINE] Acquired {len(raw_psd)} channels")
 
-            # Stage 2: Background subtraction + ML analysis
+            all_psd: List[np.ndarray] = []
+            wavelength: Optional[np.ndarray] = None
+
+            for i in range(1, self.num_reads + 1):
+                log.info(
+                    f"[PIPELINE] Reading {i}/{self.num_reads}...")
+                psd_i, wn_i = self.device.read_spectrum()
+                all_psd.append(psd_i)
+                if wavelength is None:
+                    wavelength = wn_i
+
+            raw_stack = np.vstack(all_psd)
+            psd_mean = np.mean(raw_stack, axis=0)
+            log.info(
+                f"[PIPELINE] Mean of {self.num_reads} scans: "
+                f"PSD range=[{psd_mean.min():.4e}, {psd_mean.max():.4e}]")
+
+            # ─── Stage 2: normalize + remote ML inference ─────────────
             self._emit_status('applying_ML')
-            corrected_psd = self.calibration.subtract(raw_psd)
+            normalized = self.calibration.normalize(psd_mean)
+            log.info(
+                f"[PIPELINE] Normalized (mean/bg, rounded 8): "
+                f"range=[{normalized.min():.8f}, "
+                f"{normalized.max():.8f}]  "
+                f"head={normalized[:3].tolist()}")
 
+            timestamp = time.time()
             self._last_reading = SpectralReading(
-                wavelengths=self.calibration.wavelengths,
-                raw_psd=raw_psd,
-                corrected_psd=corrected_psd,
+                wavelengths=(wavelength
+                             if wavelength is not None
+                             else self.calibration.wavelengths),
+                raw_psd_stack=raw_stack,
+                psd_mean=psd_mean,
+                normalized_psd=normalized,
                 timestamp=timestamp,
             )
 
-            result = self.analyzer.analyze(corrected_psd, task_type)
+            ml_response = self.ml_client.predict(normalized)
+            prediction = str(ml_response.get('prediction', ''))
+            classification, value = self._classify(prediction)
+            confidence = float(ml_response.get('confidence', 0.0)) \
+                if isinstance(ml_response.get('confidence'), (int, float)) \
+                else 0.95
+
+            result = AnalysisResult(
+                task_type=task_type,
+                value=value,
+                classification=classification,
+                confidence=confidence,
+                details={
+                    'ml_prediction': prediction,
+                    'ml_server': self.ml_client.server_url,
+                    'num_reads': self.num_reads,
+                    'normalized_head': [float(x) for x in normalized[:3]],
+                },
+            )
             self._last_result = result
-            log.info(f"[PIPELINE] Analysis: {result.classification} "
-                     f"(confidence={result.confidence:.2f})")
+            log.info(
+                f"[PIPELINE] ML decision: prediction={prediction!r} → "
+                f"classification={classification} value={value}")
 
-            # Stage 3: Upload / finalize
+            # ─── Stage 3: handoff ───────────────────────────────────
             self._emit_status('uploading')
-            # In production: upload results to cloud backend here
-            time.sleep(0.1)  # Placeholder for upload latency
 
-            # Stage 4: Success
+            # ─── Stage 4: success ───────────────────────────────────
             self._emit_status('success')
             return 'success', result
 
@@ -856,51 +754,41 @@ def main():
     parser = argparse.ArgumentParser(description='ANUBIX Spectrometer Driver')
     parser.add_argument('--host', default='192.168.137.2',
                         help='Si-NIR IP (USB-Ethernet gadget)')
-    parser.add_argument('--read-port', type=int, default=5001,
-                        help='TCP port for inbound data (spec: 5001)')
-    parser.add_argument('--write-port', type=int, default=5000,
-                        help='TCP port for outbound commands (spec: 5000)')
-    parser.add_argument('--integration', type=int, default=100,
-                        help='scanTime in ms (10..224)')
-    parser.add_argument('--zero-padding', type=int, default=2,
+    parser.add_argument('--read-port', type=int, default=5001)
+    parser.add_argument('--write-port', type=int, default=5000)
+    parser.add_argument('--scan-time-ms', type=int, default=2000,
+                        help='scanTime (pyConnect uses 2000)')
+    parser.add_argument('--zero-padding', type=int, default=3,
                         choices=[1, 2, 3],
-                        help='FFT points (1=8k, 2=16k, 3=32k)')
+                        help='1=8k, 2=16k, 3=32k (pyConnect: 3)')
     parser.add_argument('--optical-gain', type=int, default=0,
-                        choices=[0, 1, 2],
-                        help='0=saved on sensor, 1=calculated, 2=external')
-    parser.add_argument('--apodization', type=int, default=2,
+                        choices=[0, 1, 2])
+    parser.add_argument('--apodization', type=int, default=0,
                         choices=[0, 1, 2, 3],
-                        help='0=Boxcar 1=Gaussian 2=Happ-Genzel 3=Lorenz')
-    parser.add_argument('--task', required=True,
-                        choices=['water_stress', 'disease', 'harvest_status'],
-                        help='Analysis task type')
-    parser.add_argument('--bg', default=None,
-                        help='Path to background CSV (default: bg.csv next to this script)')
-    parser.add_argument('--repeat', type=int, default=1,
-                        help='Number of readings to take')
-    parser.add_argument('--interval', type=float, default=2.0,
-                        help='Interval between repeated readings (seconds)')
-    parser.add_argument('--quiet', action='store_true',
-                        help='Suppress hex-dump debug logs')
+                        help='0=Boxcar (pyConnect)')
+    parser.add_argument('--task', default='disease',
+                        help='Analysis task type (passed through to result)')
+    parser.add_argument('--bg', default=None)
+    parser.add_argument('--num-reads', type=int, default=5)
+    parser.add_argument('--ml-url',
+                        default=SpectrometerPipeline.DEFAULT_ML_URL)
+    parser.add_argument('--ml-timeout', type=float, default=10.0)
+    parser.add_argument('--repeat', type=int, default=1)
+    parser.add_argument('--interval', type=float, default=2.0)
+    parser.add_argument('--quiet', action='store_true')
     args = parser.parse_args()
 
-    # Find bg.csv
-    if args.bg:
-        bg_path = args.bg
-    else:
-        bg_path = str(Path(__file__).parent / 'bg.csv')
-
+    bg_path = args.bg or str(Path(__file__).parent / 'bg.csv')
     if not os.path.exists(bg_path):
         print(f"ERROR: Background file not found: {bg_path}")
         return 1
 
-    # Create device + pipeline
     device = SpectrometerDevice(
         host=args.host,
         read_port=args.read_port,
         write_port=args.write_port,
         num_channels=257,
-        integration_time_ms=args.integration,
+        scan_time_ms=args.scan_time_ms,
         zero_padding=args.zero_padding,
         optical_gain=args.optical_gain,
         apodization=args.apodization,
@@ -910,36 +798,34 @@ def main():
     pipeline = SpectrometerPipeline(
         bg_path=bg_path,
         device=device,
+        ml_server_url=args.ml_url,
+        ml_timeout_s=args.ml_timeout,
+        num_reads=args.num_reads,
     )
 
-    def status_cb(status):
-        print(f"  STATUS: {status}")
-
-    pipeline.set_status_callback(status_cb)
+    pipeline.set_status_callback(lambda s: print(f"  STATUS: {s}"))
 
     print(f"{'='*50}")
-    print(f"  ANUBIX Spectrometer - {args.task}")
-    print(f"  Host: {args.host} (read={args.read_port}, write={args.write_port})")
+    print(f"  ANUBIX Spectrometer — task={args.task}")
+    print(f"  Host: {args.host}  ML: {args.ml_url}")
+    print(f"  num_reads={args.num_reads}  scanTime={args.scan_time_ms}ms")
     print(f"{'='*50}")
 
     pipeline.connect()
-
     try:
         for i in range(args.repeat):
             if args.repeat > 1:
-                print(f"\n--- Reading {i+1}/{args.repeat} ---")
-
+                print(f"\n--- Run {i+1}/{args.repeat} ---")
             status, result = pipeline.run(args.task)
-
             if result:
                 print(f"\n  Result:")
+                print(f"    Prediction:     "
+                      f"{result.details.get('ml_prediction')}")
                 print(f"    Classification: {result.classification}")
+                print(f"    Value:          {result.value}")
                 print(f"    Confidence:     {result.confidence:.2%}")
-                print(f"    Value:          {result.value:.4f}")
-                print(f"    Details:        {result.details}")
             else:
-                print(f"\n  FAILED: pipeline returned no result")
-
+                print(f"\n  FAILED (status={status})")
             if i < args.repeat - 1:
                 time.sleep(args.interval)
     finally:
