@@ -108,6 +108,18 @@ class AnubixMasterNode(Node):
         self.pub_force_stop = self.create_publisher(Bool, '/supervisor/force_stop', cmd_qos)
         self.get_logger().info('[INIT] All 8 supervisor publishers created')
 
+        # Immediately publish False on /supervisor/force_stop so that any
+        # stale TRANSIENT_LOCAL latched True left over by a previous master
+        # process (e.g. one killed mid-mission) is overridden before the
+        # consumer nodes finish discovery. Without this, every restart can
+        # rejoin a previous "force_stopped" snapshot and reject every
+        # subsequent command. Edge semantics (True → abort, False → ready)
+        # are enforced by the consumer-side callbacks.
+        self.pub_force_stop.publish(Bool(data=False))
+        self.get_logger().info(
+            '[INIT] /supervisor/force_stop seeded with False '
+            '(clears any stale latched True from a prior session)')
+
         # Feedback synchronization events
         self._ev_nav = threading.Event()
         self._ev_perception = threading.Event()
@@ -254,10 +266,23 @@ class AnubixMasterNode(Node):
             return None
 
     def _do_force_stop(self) -> str:
+        # Edge-triggered: publish True so every consumer aborts whatever it
+        # is currently doing, wait long enough for the True to propagate and
+        # for callbacks to flip their _force_stopped flag, then publish
+        # False so the robot is immediately ready for the NEXT command and
+        # any late-joining subscriber does not inherit a sticky True.
         self.pub_force_stop.publish(Bool(data=True))
         self._force_stopped = True
         self._mission_active = False
         self.get_logger().warning('*** FORCE STOP PUBLISHED ***')
+
+        time.sleep(0.2)
+
+        self.pub_force_stop.publish(Bool(data=False))
+        self._force_stopped = False
+        self.get_logger().info(
+            '[FORCE_STOP] /supervisor/force_stop reset to False — '
+            'consumers re-armed, system ready for the next command')
         return '/system/status: force_stopped'
 
     def _do_nav_goal(self, x: float, y: float, vision: bool = False) -> str:

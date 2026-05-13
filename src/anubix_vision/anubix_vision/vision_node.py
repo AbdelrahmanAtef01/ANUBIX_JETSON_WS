@@ -215,11 +215,19 @@ class VisionNode(Node):
                 f'[VISION] Invalid target_camera value: "{val}" (not an int)')
 
     def _on_force_stop(self, msg: Bool):
-        if msg.data:
-            self._force_stopped = True
+        # Edge semantics: True aborts an in-flight pipeline (we wake the
+        # arm event so any pending arm-confirmation wait exits immediately
+        # and observes the new flag). False re-arms the node so the next
+        # perception goal can run.
+        was = self._force_stopped
+        self._force_stopped = bool(msg.data)
+        if self._force_stopped:
             self._arm_event.set()
             self.get_logger().warning(
                 '[VISION] *** FORCE STOP *** — aborting pipeline')
+        elif was:
+            self.get_logger().info(
+                '[VISION] Force stop CLEARED — ready for new goals')
 
     def _on_arm_status(self, msg: String):
         status = msg.data.strip().lower()

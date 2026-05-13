@@ -164,10 +164,18 @@ class SpectrometerNode(Node):
         self.get_logger().info(f'[SPECTRO] Status published: "{status}"')
 
     def _on_force_stop(self, msg: Bool):
-        if msg.data:
-            self._force_stopped = True
+        # Edge semantics: True aborts the current task; False re-arms the
+        # node so it can accept new targets again. The master publishes
+        # True+False back-to-back, and also seeds False at startup so a
+        # stale latched True from a previous run can never strand us.
+        was = self._force_stopped
+        self._force_stopped = bool(msg.data)
+        if self._force_stopped:
             self.get_logger().warning(
                 '[SPECTRO] *** FORCE STOP RECEIVED ***')
+        elif was:
+            self.get_logger().info(
+                '[SPECTRO] Force stop CLEARED — ready for new targets')
 
     def _on_spectral_target(self, msg: String):
         raw = msg.data.strip()

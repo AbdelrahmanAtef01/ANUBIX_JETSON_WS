@@ -141,10 +141,17 @@ class ArmNode(Node):
             self._pose_pub.publish(self._current_pose)
 
     def _on_force_stop(self, msg: Bool):
-        if msg.data:
-            self._force_stopped = True
+        # Edge semantics: True halts in-flight moves/grips; False re-arms
+        # the node. Mirrors the master's publish(True) → publish(False)
+        # sequence and lets the system recover from a stale latched True.
+        was = self._force_stopped
+        self._force_stopped = bool(msg.data)
+        if self._force_stopped:
             self.get_logger().warning(
                 '[ARM] *** FORCE STOP RECEIVED *** — halting all arm operations')
+        elif was:
+            self.get_logger().info(
+                '[ARM] Force stop CLEARED — ready for new commands')
 
     def _on_arm_goal(self, msg: PoseStamped):
         x = msg.pose.position.x
