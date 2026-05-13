@@ -10,24 +10,14 @@ import numpy as np
 CLASS_HEALTHY_LEAF = 2
 
 
-def get_target_leaf(results, frame_w, frame_h):
+def extract_healthy_leaves(results):
+    """Return a list of healthy-leaf dicts from a YOLO segmentation result.
+
+    Each dict: {'centroid': (cx, cy), 'lowest_y': int, 'pts': np.ndarray}
     """
-    Filtration logic to find the optimal target leaf from YOLO segmentation results.
-
-    Prefers the left half of the frame; falls back to right when no left leaves exist.
-    Scores candidates by proximity to the bottom-centre grab plane plus a penalty for
-    leaves that are not near the vertical middle of the plant.
-
-    Returns:
-        (all_healthy_leaves, best_target_leaf)
-        Each leaf dict: {'centroid': (cx, cy), 'lowest_y': int, 'pts': np.ndarray}
-    """
-    healthy_leaves = []
-    has_left = False
-    has_right = False
-
+    leaves = []
     if results[0].masks is None:
-        return [], None
+        return leaves
 
     for i, mask in enumerate(results[0].masks.xy):
         cls = int(results[0].boxes.cls[i])
@@ -42,27 +32,38 @@ def get_target_leaf(results, frame_w, frame_h):
         cx = int(moments['m10'] / moments['m00'])
         cy = int(moments['m01'] / moments['m00'])
 
-        if cx < frame_w // 2:
-            has_left = True
-        else:
-            has_right = True
-
-        healthy_leaves.append({
+        leaves.append({
             'centroid': (cx, cy),
             'lowest_y': int(np.max(mask_pts[:, 1])),
             'pts': mask_pts,
         })
 
+    return leaves
+
+
+def get_target_leaf(results, frame_w, frame_h):
+    """
+    Filtration logic to find the optimal target leaf from YOLO segmentation results.
+
+    Prefers the left half of the frame; falls back to right when no left leaves exist.
+    Scores candidates by proximity to the bottom-centre grab plane plus a penalty for
+    leaves that are not near the vertical middle of the plant.
+
+    Returns:
+        (all_healthy_leaves, best_target_leaf)
+    """
+    healthy_leaves = extract_healthy_leaves(results)
     if not healthy_leaves:
         return [], None
 
-    # Prefer left side; only use right if no left leaves exist
+    has_left = any(l['centroid'][0] < frame_w // 2 for l in healthy_leaves)
+    has_right = any(l['centroid'][0] >= frame_w // 2 for l in healthy_leaves)
+
     if has_left:
         selected = [l for l in healthy_leaves if l['centroid'][0] < frame_w // 2]
-    else:
+    elif has_right:
         selected = [l for l in healthy_leaves if l['centroid'][0] >= frame_w // 2]
-
-    if not selected:
+    else:
         return healthy_leaves, None
 
     all_y = [l['centroid'][1] for l in selected]
@@ -91,6 +92,50 @@ def get_target_leaf(results, frame_w, frame_h):
     return healthy_leaves, target_leaf
 
 
+def get_closest_leaf_to_gripper(results, gripper_x, gripper_y):
+    """Camera-2 (flange) selection: pick the healthy leaf whose centroid is
+    nearest to the gripper pixel position. Returns (all_leaves, target_leaf)."""
+    healthy_leaves = extract_healthy_leaves(results)
+    if not healthy_leaves:
+        return [], None
+
+    best = None
+    best_dist = float('inf')
+    for leaf in healthy_leaves:
+        cx, cy = leaf['centroid']
+        d = (cx - gripper_x) ** 2 + (cy - gripper_y) ** 2
+        if d < best_dist:
+            best_dist = d
+            best = leaf
+
+    return healthy_leaves, best
+
+
+def match_closest_leaf(results, anchor_centroid, max_dist_px=200):
+    """Re-identify the same leaf in a later frame by picking the detection
+    whose centroid is nearest to ``anchor_centroid``. Returns
+    (all_leaves, matched_leaf, distance_px). matched_leaf is None if the
+    nearest candidate is farther than ``max_dist_px``."""
+    healthy_leaves = extract_healthy_leaves(results)
+    if not healthy_leaves:
+        return [], None, float('inf')
+
+    ax, ay = anchor_centroid
+    best = None
+    best_dist = float('inf')
+    for leaf in healthy_leaves:
+        cx, cy = leaf['centroid']
+        d = float(np.sqrt((cx - ax) ** 2 + (cy - ay) ** 2))
+        if d < best_dist:
+            best_dist = d
+            best = leaf
+
+    if best is None or best_dist > max_dist_px:
+        return healthy_leaves, None, best_dist
+
+    return healthy_leaves, best, best_dist
+
+
 def draw_leaves(frame, all_leaves, target_leaf):
     """Draw all healthy leaves in blue; target leaf outline in green with centroid dot."""
     for leaf in all_leaves:
@@ -110,3 +155,11 @@ def draw_grabber_ui(frame, gx, gy):
     cv2.line(frame, (gx, gy - 15), (gx, gy + 15), (255, 0, 0), 2)
     cv2.putText(frame, f'GRABBER (X:{gx}, Y:{gy})', (gx - 75, gy - 25),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+
+
+def draw_hud(frame, lines, origin=(10, 25)):
+    """Render a stack of status lines on the top-left."""
+    x, y = origin
+    for i, line in enumerate(lines):
+        cv2.putText(frame, line, (x, y + 22 * i),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)

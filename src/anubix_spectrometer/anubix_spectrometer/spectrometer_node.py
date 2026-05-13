@@ -8,6 +8,11 @@ Publishes to:  /spectrometer/status (std_msgs/String)
                /spectrometer/result (std_msgs/String)  JSON — on success only
 
 Status values: reading | applying_ML | uploading | success | failure
+
+The /supervisor/spectral_target payload can be either:
+  - "task_type"                              (legacy form)
+  - "task_type|robot_id|task_id"             (preferred — propagates the
+    OmniLink-supplied UUIDs through to Supabase)
 """
 
 import os
@@ -42,17 +47,23 @@ class SpectrometerNode(Node):
 
         # Parameters
         self.declare_parameter('simulate', True)
-        self.declare_parameter('serial_port', '/dev/ttyUSB0')
-        self.declare_parameter('baud_rate', 115200)
+        # The spectrometer presents itself as a USB-Ethernet gadget — the
+        # Jetson talks to it over TCP/IP, NOT serial.
+        self.declare_parameter('host', '192.168.137.2')
+        self.declare_parameter('tcp_port', 5555)
         self.declare_parameter('num_channels', 257)
         self.declare_parameter('integration_time_ms', 100)
+        self.declare_parameter('connect_timeout_s', 5.0)
+        self.declare_parameter('read_timeout_s', 5.0)
         self.declare_parameter('bg_file', '')
 
         self._simulate = self.get_parameter('simulate').value
-        self._serial_port = self.get_parameter('serial_port').value
-        self._baud_rate = self.get_parameter('baud_rate').value
+        self._host = self.get_parameter('host').value
+        self._tcp_port = int(self.get_parameter('tcp_port').value)
         self._num_channels = self.get_parameter('num_channels').value
         self._integration_time_ms = self.get_parameter('integration_time_ms').value
+        self._connect_timeout_s = float(self.get_parameter('connect_timeout_s').value)
+        self._read_timeout_s = float(self.get_parameter('read_timeout_s').value)
         bg_file_param = self.get_parameter('bg_file').value
 
         # Locate bg.csv
@@ -108,10 +119,12 @@ class SpectrometerNode(Node):
         device = None
         if not self._simulate:
             device = SpectrometerDevice(
-                port=self._serial_port,
-                baud_rate=self._baud_rate,
+                host=self._host,
+                tcp_port=self._tcp_port,
                 num_channels=self._num_channels,
                 integration_time_ms=self._integration_time_ms,
+                connect_timeout_s=self._connect_timeout_s,
+                read_timeout_s=self._read_timeout_s,
             )
 
         self._pipeline = SpectrometerPipeline(
@@ -133,7 +146,9 @@ class SpectrometerNode(Node):
         self._force_stopped = False
         self._lock = threading.Lock()
 
-        mode = 'SIMULATE' if self._simulate else self._serial_port
+        mode = (
+            'SIMULATE' if self._simulate
+            else f'TCP {self._host}:{self._tcp_port}')
         self.get_logger().info('=' * 50)
         self.get_logger().info('  ANUBIX Spectrometer Node - Jetson Orin Nano')
         self.get_logger().info(f'  Mode: {mode}')
@@ -157,12 +172,18 @@ class SpectrometerNode(Node):
                 '[SPECTRO] *** FORCE STOP RECEIVED ***')
 
     def _on_spectral_target(self, msg: String):
-        task_type = msg.data.strip().lower()
+        raw = msg.data.strip()
+        parts = raw.split('|')
+        task_type = parts[0].strip().lower() if parts else ''
+        robot_id = parts[1].strip() if len(parts) > 1 else ''
+        task_id = parts[2].strip() if len(parts) > 2 else ''
 
         self.get_logger().info(
             f'[SPECTRO] ========================================')
         self.get_logger().info(
-            f'[SPECTRO] Target RECEIVED: "{task_type}"')
+            f'[SPECTRO] Target RECEIVED: task="{task_type}" '
+            f'robot_id="{robot_id or "(none)"}" '
+            f'task_id="{task_id or "(none)"}"')
         self.get_logger().info(
             f'[SPECTRO] ========================================')
 
@@ -180,9 +201,12 @@ class SpectrometerNode(Node):
             self._busy = True
 
         threading.Thread(
-            target=self._run_pipeline, args=(task_type,), daemon=True).start()
+            target=self._run_pipeline,
+            args=(task_type, robot_id, task_id),
+            daemon=True,
+        ).start()
 
-    def _run_pipeline(self, task_type: str):
+    def _run_pipeline(self, task_type: str, robot_id: str = '', task_id: str = ''):
         try:
             self.get_logger().info(
                 f'[SPECTRO] Starting pipeline for task: "{task_type}"')
@@ -204,6 +228,11 @@ class SpectrometerNode(Node):
                     'confidence': result.confidence,
                     'details': result.details,
                     'timestamp': time.time(),
+                    # Forwarded straight from /supervisor/spectral_target so
+                    # Supabase can attribute the reading to the right
+                    # robot/task without relying on hardcoded UUIDs.
+                    'robot_id': robot_id,
+                    'task_id': task_id,
                 }, separators=(',', ':'))
                 self._result_pub.publish(String(data=result_payload))
                 self.get_logger().info(

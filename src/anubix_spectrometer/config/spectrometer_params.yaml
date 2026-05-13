@@ -1,8 +1,13 @@
 anubix_spectrometer:
   ros__parameters:
     simulate: true
-    serial_port: "/dev/ttyUSB0"
-    baud_rate: 115200
+    # The spectrometer is a USB-Ethernet device, NOT a serial port.
+    # The Jetson must have a usb0/eth-over-USB interface configured for
+    # this subnet (default sensor IP: 192.168.137.2).
+    host: "192.168.137.2"
+    tcp_port: 5555
     num_channels: 257
     integration_time_ms: 100
+    connect_timeout_s: 5.0
+    read_timeout_s: 5.0
     bg_file: ""  # Leave empty to use the installed bg.csv from package share

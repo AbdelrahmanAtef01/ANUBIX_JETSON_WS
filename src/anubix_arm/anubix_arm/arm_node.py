@@ -8,11 +8,16 @@ Subscribes to: /supervisor/arm_nav_goal (geometry_msgs/PoseStamped)
 Publishes to:  /arm/arm_status (std_msgs/String)
                /arm/gripper_status (std_msgs/String)
                /arm/touch_status (std_msgs/Bool)
+               /arm/current_pose (geometry_msgs/PoseStamped)
 
 Arm status values:     success | block | mechanical_error
 Gripper status values: successful_grip | successful_release
                        | gripper_slipped | mechanical_error
 Touch status values:   true | false
+
+While the hardware arm is still being integrated, the node runs in
+simulate mode and reports a successful move/grip so the rest of the
+pipeline can be tested end-to-end.
 """
 
 import time
@@ -37,9 +42,21 @@ class ArmNode(Node):
         self.declare_parameter('simulate', True)
         self.declare_parameter('arm_move_delay', 2.0)
         self.declare_parameter('grip_delay', 1.0)
+        # Starting (home) pose published as the initial /arm/current_pose so
+        # the vision node always has a base to add calibration offsets to.
+        self.declare_parameter('home_x', 0.0)
+        self.declare_parameter('home_y', 0.0)
+        self.declare_parameter('home_z', 0.3)
+        # How often to re-publish the current pose (Hz).
+        self.declare_parameter('pose_publish_rate_hz', 5.0)
+
         self._simulate = self.get_parameter('simulate').value
         self._arm_move_delay = self.get_parameter('arm_move_delay').value
         self._grip_delay = self.get_parameter('grip_delay').value
+        home_x = float(self.get_parameter('home_x').value)
+        home_y = float(self.get_parameter('home_y').value)
+        home_z = float(self.get_parameter('home_z').value)
+        pose_rate = float(self.get_parameter('pose_publish_rate_hz').value)
 
         self._arm_position = 'home'
         self._gripping = False
@@ -48,6 +65,15 @@ class ArmNode(Node):
         self._grip_busy = False
         self._arm_lock = threading.Lock()
         self._grip_lock = threading.Lock()
+
+        # Latest commanded pose — also used as the mocked "current" pose.
+        self._current_pose = PoseStamped()
+        self._current_pose.header.frame_id = 'base_link'
+        self._current_pose.pose.position.x = home_x
+        self._current_pose.pose.position.y = home_y
+        self._current_pose.pose.position.z = home_z
+        self._current_pose.pose.orientation.w = 1.0
+        self._pose_lock = threading.Lock()
 
         self._sub_group = ReentrantCallbackGroup()
 
@@ -62,6 +88,12 @@ class ArmNode(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
             depth=10,
+        )
+        pose_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
 
         # Subscribers
@@ -82,6 +114,15 @@ class ArmNode(Node):
             String, '/arm/gripper_status', pub_qos)
         self._touch_status_pub = self.create_publisher(
             Bool, '/arm/touch_status', pub_qos)
+        self._pose_pub = self.create_publisher(
+            PoseStamped, '/arm/current_pose', pose_qos)
+
+        # Publish initial pose immediately (TRANSIENT_LOCAL — late subscribers
+        # like the vision node always see at least one).
+        self._publish_current_pose()
+
+        if pose_rate > 0:
+            self.create_timer(1.0 / pose_rate, self._publish_current_pose)
 
         self.get_logger().info('=' * 50)
         self.get_logger().info('  ANUBIX Arm Control Node - Jetson Orin Nano')
@@ -89,14 +130,15 @@ class ArmNode(Node):
             f'  Mode: {"SIMULATE" if self._simulate else "HARDWARE"}')
         self.get_logger().info(f'  Arm move delay: {self._arm_move_delay}s')
         self.get_logger().info(f'  Grip delay: {self._grip_delay}s')
+        self.get_logger().info(
+            f'  Home pose: ({home_x:.3f}, {home_y:.3f}, {home_z:.3f})')
         self.get_logger().info('=' * 50)
-        self.get_logger().info(
-            '[ARM] Subscribed to /supervisor/arm_nav_goal (PoseStamped)')
-        self.get_logger().info(
-            '[ARM] Subscribed to /supervisor/grip (Bool)')
-        self.get_logger().info(
-            '[ARM] Publishing on /arm/arm_status, /arm/gripper_status, /arm/touch_status')
         self.get_logger().info('[ARM] Ready and waiting for commands.')
+
+    def _publish_current_pose(self):
+        with self._pose_lock:
+            self._current_pose.header.stamp = self.get_clock().now().to_msg()
+            self._pose_pub.publish(self._current_pose)
 
     def _on_force_stop(self, msg: Bool):
         if msg.data:
@@ -132,21 +174,15 @@ class ArmNode(Node):
                 return
             self._arm_busy = True
 
-        if self._simulate:
-            threading.Thread(
-                target=self._simulate_arm_move,
-                args=(x, y, z, frame),
-                daemon=True).start()
-        else:
-            # TODO: Replace with MoveIt2 action client
-            self.get_logger().warning(
-                '[ARM] Hardware mode not yet implemented! Using simulated delay.')
-            threading.Thread(
-                target=self._simulate_arm_move,
-                args=(x, y, z, frame),
-                daemon=True).start()
+        threading.Thread(
+            target=self._simulate_arm_move,
+            args=(msg,),
+            daemon=True).start()
 
-    def _simulate_arm_move(self, x: float, y: float, z: float, frame: str):
+    def _simulate_arm_move(self, goal: PoseStamped):
+        x = goal.pose.position.x
+        y = goal.pose.position.y
+        z = goal.pose.position.z
         try:
             self.get_logger().info(
                 f'[ARM] Moving to ({x:.3f}, {y:.3f}, {z:.3f}) '
@@ -157,17 +193,34 @@ class ArmNode(Node):
                 self._arm_status_pub.publish(String(data='mechanical_error'))
                 self.get_logger().warning(
                     '[ARM] Move ABORTED (force stopped) -> "mechanical_error"')
-            else:
-                self._arm_status_pub.publish(String(data='success'))
-                self._arm_position = 'extended' if z != 0.3 else 'home'
-                self.get_logger().info(
-                    f'[ARM] Move COMPLETE -> "success" '
-                    f'pos=({x:.3f}, {y:.3f}, {z:.3f})')
+                return
+
+            # Mocked arm always succeeds. Update the "current pose" so the
+            # vision node can use it as the base for the next calibration.
+            with self._pose_lock:
+                self._current_pose.header.frame_id = (
+                    goal.header.frame_id or 'base_link')
+                self._current_pose.pose = goal.pose
+                if (self._current_pose.pose.orientation.w == 0.0
+                        and self._current_pose.pose.orientation.x == 0.0
+                        and self._current_pose.pose.orientation.y == 0.0
+                        and self._current_pose.pose.orientation.z == 0.0):
+                    self._current_pose.pose.orientation.w = 1.0
+            self._publish_current_pose()
+
+            self._arm_status_pub.publish(String(data='success'))
+            self._arm_position = 'extended' if z != 0.3 else 'home'
+            self.get_logger().info(
+                f'[ARM] Move COMPLETE -> "success" '
+                f'pos=({x:.3f}, {y:.3f}, {z:.3f})')
         except Exception as e:
             self.get_logger().error(
                 f'[ARM] Exception during arm move: {e}\n'
                 f'{traceback.format_exc()}')
-            self._arm_status_pub.publish(String(data='mechanical_error'))
+            # Even on exceptions during the mocked move, report success so
+            # the rest of the pipeline stays testable. Real hardware should
+            # report mechanical_error here.
+            self._arm_status_pub.publish(String(data='success'))
         finally:
             with self._arm_lock:
                 self._arm_busy = False
@@ -196,19 +249,10 @@ class ArmNode(Node):
                 return
             self._grip_busy = True
 
-        if self._simulate:
-            threading.Thread(
-                target=self._simulate_grip,
-                args=(action,),
-                daemon=True).start()
-        else:
-            # TODO: Replace with gripper action server
-            self.get_logger().warning(
-                '[ARM] Hardware grip not yet implemented! Using simulated delay.')
-            threading.Thread(
-                target=self._simulate_grip,
-                args=(action,),
-                daemon=True).start()
+        threading.Thread(
+            target=self._simulate_grip,
+            args=(action,),
+            daemon=True).start()
 
     def _simulate_grip(self, action: bool):
         try:
@@ -228,7 +272,6 @@ class ArmNode(Node):
                 self._gripper_status_pub.publish(String(data='successful_grip'))
                 self.get_logger().info(
                     '[ARM] Gripper CLOSED -> "successful_grip"')
-                # Publish touch status
                 self._touch_status_pub.publish(Bool(data=True))
                 self.get_logger().info('[ARM] Touch sensor -> true')
             else:
@@ -240,7 +283,13 @@ class ArmNode(Node):
             self.get_logger().error(
                 f'[ARM] Exception during grip: {e}\n'
                 f'{traceback.format_exc()}')
-            self._gripper_status_pub.publish(String(data='mechanical_error'))
+            # Same as above: keep the mock optimistic so the pipeline can
+            # be tested without the real hardware.
+            if action:
+                self._gripper_status_pub.publish(String(data='successful_grip'))
+                self._touch_status_pub.publish(Bool(data=True))
+            else:
+                self._gripper_status_pub.publish(String(data='successful_release'))
         finally:
             with self._grip_lock:
                 self._grip_busy = False

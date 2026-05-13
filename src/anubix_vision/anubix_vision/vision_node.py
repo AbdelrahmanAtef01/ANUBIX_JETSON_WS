@@ -3,18 +3,29 @@
 ANUBIX Vision Node (Jetson Orin Nano)
 ======================================
 Runs YOLO segmentation for leaf detection. Handles both RealSense (3D depth)
-and USB mono camera (calibration-based distance measurement).
+and USB mono camera (flange / calibration-based distance measurement).
+
+Camera 1 (RealSense, base):
+  Uses the full ``get_target_leaf`` scoring (left-half preference + middle
+  penalty) to pick the best leaf on the plant.
+
+Camera 2 (USB, flange-mounted on the arm):
+  Picks the leaf closest to the gripper pixel position, then re-identifies
+  the SAME leaf in a second frame (after a 1 cm right calibration move)
+  using a nearest-centroid match so the calibration cannot lock onto a
+  different leaf between frames.
 
 Subscribes:
-  /supervisor/perception_goal  (std_msgs/String)       task_type, e.g. "disease"
-  /supervisor/target_camera    (std_msgs/String)       "1" = RealSense, "2" = USB
-  /supervisor/force_stop       (std_msgs/Bool)         abort immediately
-  /arm/arm_status              (std_msgs/String)       "success" = calibration move done
+  /supervisor/perception_goal  (std_msgs/String)
+  /supervisor/target_camera    (std_msgs/String)        "1"=RealSense, "2"=USB
+  /supervisor/force_stop       (std_msgs/Bool)
+  /arm/arm_status              (std_msgs/String)        "success" = move done
+  /arm/current_pose            (geometry_msgs/PoseStamped)  latest arm pose
 
 Publishes:
-  /perception/status           (std_msgs/String)       "found" | "not_found"
-  /perception/target_pose      (geometry_msgs/Pose)    leaf position in metres
-  /supervisor/arm_nav_goal     (geometry_msgs/PoseStamped)  calibration: 1 cm right
+  /perception/status           (std_msgs/String)        "found" | "not_found"
+  /perception/target_pose      (geometry_msgs/Pose)
+  /supervisor/arm_nav_goal     (geometry_msgs/PoseStamped)  absolute calibration pose
 """
 
 import sys
@@ -49,7 +60,14 @@ try:
 except ImportError:
     REALSENSE_AVAILABLE = False
 
-from anubix_vision.leaf_detection import draw_grabber_ui, draw_leaves, get_target_leaf
+from anubix_vision.leaf_detection import (
+    draw_grabber_ui,
+    draw_hud,
+    draw_leaves,
+    get_closest_leaf_to_gripper,
+    get_target_leaf,
+    match_closest_leaf,
+)
 
 
 class VisionNode(Node):
@@ -61,16 +79,42 @@ class VisionNode(Node):
         self.declare_parameter('model_path', '../best.engine')
         self.declare_parameter('confidence', 0.5)
         self.declare_parameter('usb_camera_index', 0)
-        self.declare_parameter('show_preview', False)
-        self.declare_parameter('detection_max_attempts', 30)
+        self.declare_parameter('visualize', False)
+        # Wall-clock seconds to keep retrying detection before giving up.
+        self.declare_parameter('detection_timeout_s', 30.0)
+        # How many detection attempts per second while polling.
+        self.declare_parameter('detection_rate_hz', 2.0)
         self.declare_parameter('arm_move_timeout_s', 30.0)
+        # Pixel position of the gripper in each camera's frame. -1 = use
+        # the centre of the live frame at runtime.
+        self.declare_parameter('gripper_px_x_cam1', -1)
+        self.declare_parameter('gripper_px_y_cam1', -1)
+        self.declare_parameter('gripper_px_x_cam2', -1)
+        self.declare_parameter('gripper_px_y_cam2', -1)
+        # Maximum pixel distance allowed when re-identifying the leaf in
+        # camera 2's second (post-calibration) frame.
+        self.declare_parameter('tracking_max_dist_px', 200)
+        # Calibration step size (metres). USB camera commands the arm to
+        # move by exactly this much to the right.
+        self.declare_parameter('calibration_step_m', 0.01)
 
         self._model_path = self.get_parameter('model_path').value
         self._confidence = float(self.get_parameter('confidence').value)
         self._usb_cam_index = int(self.get_parameter('usb_camera_index').value)
-        self._show_preview = bool(self.get_parameter('show_preview').value)
-        self._max_attempts = int(self.get_parameter('detection_max_attempts').value)
+        self._visualize = bool(self.get_parameter('visualize').value)
+        self._detection_timeout = float(self.get_parameter('detection_timeout_s').value)
+        self._detection_rate = float(self.get_parameter('detection_rate_hz').value)
         self._arm_timeout = float(self.get_parameter('arm_move_timeout_s').value)
+        self._gripper_px_cam1 = (
+            int(self.get_parameter('gripper_px_x_cam1').value),
+            int(self.get_parameter('gripper_px_y_cam1').value),
+        )
+        self._gripper_px_cam2 = (
+            int(self.get_parameter('gripper_px_x_cam2').value),
+            int(self.get_parameter('gripper_px_y_cam2').value),
+        )
+        self._tracking_max_dist = int(self.get_parameter('tracking_max_dist_px').value)
+        self._calibration_step_m = float(self.get_parameter('calibration_step_m').value)
 
         # State
         self._target_camera: int = 1
@@ -79,6 +123,11 @@ class VisionNode(Node):
         self._active_lock = threading.Lock()
         self._active: bool = False
         self._model = None
+
+        # Latest arm pose published by the arm node, used to build absolute
+        # calibration goals instead of relative offsets.
+        self._latest_arm_pose: PoseStamped = None
+        self._arm_pose_lock = threading.Lock()
 
         self._sub_group = ReentrantCallbackGroup()
 
@@ -108,6 +157,9 @@ class VisionNode(Node):
         self.create_subscription(
             String, '/arm/arm_status', self._on_arm_status,
             sub_qos, callback_group=self._sub_group)
+        self.create_subscription(
+            PoseStamped, '/arm/current_pose', self._on_arm_pose,
+            sub_qos, callback_group=self._sub_group)
 
         # Publishers
         self._pub_status = self.create_publisher(
@@ -128,13 +180,17 @@ class VisionNode(Node):
             f'{"AVAILABLE" if REALSENSE_AVAILABLE else "NOT FOUND (camera 1 disabled)"}')
         self.get_logger().info(f'  USB camera index: {self._usb_cam_index}')
         self.get_logger().info(f'  Confidence threshold: {self._confidence}')
-        self.get_logger().info(f'  Max detection attempts: {self._max_attempts}')
+        self.get_logger().info(
+            f'  Detection: up to {self._detection_timeout:.1f}s @ '
+            f'{self._detection_rate:.1f} Hz')
+        self.get_logger().info(f'  Visualize: {self._visualize}')
+        self.get_logger().info(
+            f'  Gripper pixel (cam1): {self._gripper_px_cam1} '
+            f'(<0 = frame centre)')
+        self.get_logger().info(
+            f'  Gripper pixel (cam2): {self._gripper_px_cam2} '
+            f'(<0 = frame centre)')
         self.get_logger().info('=' * 60)
-        self.get_logger().info(
-            '[VISION] Subscribed to /supervisor/perception_goal, '
-            '/supervisor/target_camera, /supervisor/force_stop, /arm/arm_status')
-        self.get_logger().info(
-            '[VISION] Publishing on /perception/status, /perception/target_pose')
         self.get_logger().info('[VISION] Ready and waiting for goals.')
 
     def _load_model(self):
@@ -178,6 +234,10 @@ class VisionNode(Node):
             self._arm_event.set()
             self.get_logger().info(
                 '[VISION] Arm calibration move CONFIRMED')
+
+    def _on_arm_pose(self, msg: PoseStamped):
+        with self._arm_pose_lock:
+            self._latest_arm_pose = msg
 
     def _on_perception_goal(self, msg: String):
         task_type = msg.data.strip().lower()
@@ -241,6 +301,42 @@ class VisionNode(Node):
             with self._active_lock:
                 self._active = False
 
+    # Visualization helper
+
+    def _show(self, window: str, frame):
+        """Show frame if visualize=true. Safe to call when no display."""
+        if not self._visualize:
+            return
+        try:
+            cv2.imshow(window, frame)
+            cv2.waitKey(1)
+        except cv2.error as exc:
+            self.get_logger().debug(f'[VISION] imshow failed: {exc}')
+
+    def _close_windows(self):
+        if not self._visualize:
+            return
+        try:
+            cv2.destroyAllWindows()
+        except cv2.error:
+            pass
+
+    # Time-bounded detection helpers
+
+    def _detection_period(self) -> float:
+        if self._detection_rate <= 0.0:
+            return 0.5
+        return 1.0 / self._detection_rate
+
+    def _resolve_gripper(self, configured, width, height):
+        """Return (gx, gy) clamped to the frame. -1 entries fall back to centre."""
+        gx, gy = configured
+        if gx < 0:
+            gx = width // 2
+        if gy < 0:
+            gy = height // 2
+        return int(max(0, min(gx, width - 1))), int(max(0, min(gy, height - 1)))
+
     # Camera 1: Intel RealSense
 
     def _run_realsense(self, task_type: str):
@@ -268,18 +364,26 @@ class VisionNode(Node):
                 f'intrinsics: {intrinsics.width}x{intrinsics.height} '
                 f'fx={intrinsics.fx:.1f} fy={intrinsics.fy:.1f}')
 
-            for attempt in range(self._max_attempts):
+            deadline = time.time() + self._detection_timeout
+            period = self._detection_period()
+            attempt = 0
+
+            while time.time() < deadline:
                 if self._force_stopped:
                     self.get_logger().warning(
                         '[VISION] Force stopped during RealSense capture')
                     self._pub_status.publish(String(data='not_found'))
                     return
 
+                attempt += 1
+                loop_start = time.time()
+
                 try:
-                    frames = pipeline.wait_for_frames(timeout_ms=3000)
+                    frames = pipeline.wait_for_frames(timeout_ms=2000)
                 except RuntimeError as exc:
                     self.get_logger().warning(
-                        f'[VISION] RealSense frame timeout (attempt {attempt+1}): {exc}')
+                        f'[VISION] RealSense frame timeout (attempt {attempt}): {exc}')
+                    self._sleep_remainder(loop_start, period)
                     continue
 
                 aligned = align.process(frames)
@@ -288,21 +392,37 @@ class VisionNode(Node):
 
                 if not depth_frame or not color_frame:
                     self.get_logger().debug(
-                        f'[VISION] No valid frame (attempt {attempt+1})')
+                        f'[VISION] No valid frame (attempt {attempt})')
+                    self._sleep_remainder(loop_start, period)
                     continue
 
                 color_image = np.asanyarray(color_frame.get_data())
                 h, w = color_image.shape[:2]
+                gx, gy = self._resolve_gripper(self._gripper_px_cam1, w, h)
 
                 results = self._model.predict(
                     color_image, conf=self._confidence, verbose=False)
                 all_leaves, target_leaf = get_target_leaf(results, w, h)
 
+                if self._visualize:
+                    debug = color_image.copy()
+                    draw_leaves(debug, all_leaves, target_leaf)
+                    draw_grabber_ui(debug, gx, gy)
+                    remaining = max(0.0, deadline - time.time())
+                    draw_hud(debug, [
+                        f'CAM 1 (RealSense) task={task_type}',
+                        f'attempt={attempt} t_left={remaining:0.1f}s',
+                        f'leaves={len(all_leaves)} target={"yes" if target_leaf else "no"}',
+                    ])
+                    self._show('Anubix - Camera 1 (RealSense)', debug)
+
                 if not target_leaf:
-                    if (attempt + 1) % 5 == 0:
+                    if attempt % 5 == 0:
                         self.get_logger().info(
-                            f'[VISION] RealSense attempt {attempt+1}/{self._max_attempts}: '
-                            f'no target leaf detected')
+                            f'[VISION] RealSense attempt {attempt}: '
+                            f'no target leaf detected '
+                            f'(t_left={max(0.0, deadline - time.time()):0.1f}s)')
+                    self._sleep_remainder(loop_start, period)
                     continue
 
                 cx, cy = target_leaf['centroid']
@@ -311,6 +431,7 @@ class VisionNode(Node):
                 if dist <= 0.0:
                     self.get_logger().debug(
                         f'[VISION] Invalid depth at ({cx},{cy}), retrying')
+                    self._sleep_remainder(loop_start, period)
                     continue
 
                 pt = rs.rs2_deproject_pixel_to_point(intrinsics, [cx, cy], dist)
@@ -333,18 +454,23 @@ class VisionNode(Node):
                     '[VISION] Published /perception/target_pose and '
                     '/perception/status="found"')
 
-                if self._show_preview:
-                    draw_leaves(color_image, all_leaves, target_leaf)
-                    draw_grabber_ui(color_image, w // 2, h // 2)
-                    cv2.imshow('Anubix - RealSense', color_image)
-                    cv2.waitKey(1)
-                    cv2.destroyAllWindows()
+                if self._visualize:
+                    final = color_image.copy()
+                    draw_leaves(final, all_leaves, target_leaf)
+                    draw_grabber_ui(final, gx, gy)
+                    draw_hud(final, [
+                        f'CAM 1 FOUND task={task_type}',
+                        f'pixel=({cx},{cy}) depth={dist:.2f}m',
+                        f'3D=({x_m:.3f}, {y_m:.3f}, {z_m:.3f})',
+                    ])
+                    self._show('Anubix - Camera 1 (RealSense)', final)
+                    time.sleep(1.0)
 
                 return
 
             self.get_logger().warning(
-                f'[VISION] No target found after {self._max_attempts} '
-                f'RealSense attempts. Publishing "not_found".')
+                f'[VISION] No target found within {self._detection_timeout:.1f}s '
+                f'on RealSense ({attempt} attempts). Publishing "not_found".')
             self._pub_status.publish(String(data='not_found'))
 
         except Exception as exc:
@@ -358,15 +484,16 @@ class VisionNode(Node):
                 self.get_logger().info('[VISION] RealSense pipeline stopped')
             except Exception:
                 pass
-            if self._show_preview:
-                cv2.destroyAllWindows()
+            self._close_windows()
 
-    # Camera 2: USB mono with calibration
+    # Camera 2: USB flange — closest leaf to gripper, then re-identify
 
     def _run_usb(self, task_type: str):
         self.get_logger().info(
             f'[VISION] Opening USB camera at index {self._usb_cam_index}...')
-        cap = cv2.VideoCapture(self._usb_cam_index, cv2.CAP_V4L2)
+        # CAP_V4L2 is Linux-only; default backend on other OSes.
+        backend = getattr(cv2, 'CAP_V4L2', 0)
+        cap = cv2.VideoCapture(self._usb_cam_index, backend)
 
         if not cap.isOpened():
             self.get_logger().error(
@@ -377,86 +504,44 @@ class VisionNode(Node):
             return
 
         try:
-            # Flush stale buffered frames
             for _ in range(10):
                 cap.read()
 
             ret, probe = cap.read()
             if not ret:
                 self.get_logger().error(
-                    '[VISION] USB camera: first read FAILED. '
-                    'Camera may be disconnected or in error state.')
+                    '[VISION] USB camera: first read FAILED.')
                 self._pub_status.publish(String(data='not_found'))
                 return
 
             h, w = probe.shape[:2]
-            grabber_x = w // 2
-            grabber_y = h // 2
+            gx, gy = self._resolve_gripper(self._gripper_px_cam2, w, h)
             self.get_logger().info(
                 f'[VISION] USB camera opened: {w}x{h} px, '
-                f'grabber center=({grabber_x},{grabber_y})')
+                f'gripper pixel=({gx},{gy})')
 
-            # Phase 1: first centroid
+            # Phase 1: pick the leaf closest to the gripper pixel
             self.get_logger().info(
-                '[VISION] === USB Phase 1: searching for initial leaf ===')
-            centroid_1 = None
-
-            for attempt in range(self._max_attempts):
-                if self._force_stopped:
-                    self.get_logger().warning(
-                        '[VISION] Force stopped during USB Phase 1')
-                    self._pub_status.publish(String(data='not_found'))
-                    return
-
-                ret, frame = cap.read()
-                if not ret:
-                    continue
-
-                results = self._model.predict(
-                    frame, conf=self._confidence, verbose=False)
-                all_leaves, target_leaf = get_target_leaf(results, w, h)
-
-                if target_leaf:
-                    centroid_1 = target_leaf['centroid']
-                    self.get_logger().info(
-                        f'[VISION] Phase 1 COMPLETE — '
-                        f'centroid_1=({centroid_1[0]}, {centroid_1[1]})')
-                    break
-
-                if (attempt + 1) % 5 == 0:
-                    self.get_logger().info(
-                        f'[VISION] Phase 1 attempt {attempt+1}/{self._max_attempts}: '
-                        f'no target')
-
+                '[VISION] === USB Phase 1: closest-leaf-to-gripper ===')
+            centroid_1, leaf_1 = self._detect_phase1(cap, w, h, gx, gy, task_type)
             if centroid_1 is None:
                 self.get_logger().warning(
-                    f'[VISION] Phase 1 FAILED — no leaf found in '
-                    f'{self._max_attempts} attempts. Publishing "not_found".')
+                    f'[VISION] Phase 1 FAILED — no leaf within '
+                    f'{self._detection_timeout:.1f}s. Publishing "not_found".')
                 self._pub_status.publish(String(data='not_found'))
                 return
 
-            # Calibration arm move: 1 cm right
-            self.get_logger().info(
-                '[VISION] === Calibration: sending arm 1 cm right ===')
-            self._arm_event.clear()
+            # Send absolute calibration goal: latest arm pose + 1 cm right (X)
+            if not self._send_calibration_arm_goal():
+                self._pub_status.publish(String(data='not_found'))
+                return
 
-            ps = PoseStamped()
-            ps.header.stamp = self.get_clock().now().to_msg()
-            ps.header.frame_id = 'calibration'
-            ps.pose.position.x = 0.01
-            ps.pose.position.y = 0.0
-            ps.pose.position.z = 0.0
-            ps.pose.orientation.w = 1.0
-            self._pub_arm_goal.publish(ps)
             self.get_logger().info(
-                f'[VISION] Published calibration arm_nav_goal. '
-                f'Waiting for /arm/arm_status="success" '
+                f'[VISION] Waiting for /arm/arm_status="success" '
                 f'(timeout={self._arm_timeout}s)...')
-
             if not self._arm_event.wait(timeout=self._arm_timeout):
                 self.get_logger().error(
-                    '[VISION] Arm move TIMED OUT — calibration failed! '
-                    'Check: arm_node running and responding.')
+                    '[VISION] Arm move TIMED OUT — calibration failed!')
                 self._pub_status.publish(String(data='not_found'))
                 return
 
@@ -473,71 +558,46 @@ class VisionNode(Node):
             for _ in range(5):
                 cap.read()
 
-            # Phase 2: second centroid
+            # Phase 2: re-identify the SAME leaf using nearest-centroid
+            # matching to the Phase-1 centroid (with a sanity radius).
             self.get_logger().info(
-                '[VISION] === USB Phase 2: searching for leaf after arm move ===')
-            centroid_2 = None
-
-            for attempt in range(self._max_attempts):
-                if self._force_stopped:
-                    self.get_logger().warning(
-                        '[VISION] Force stopped during USB Phase 2')
-                    self._pub_status.publish(String(data='not_found'))
-                    return
-
-                ret, frame = cap.read()
-                if not ret:
-                    continue
-
-                results = self._model.predict(
-                    frame, conf=self._confidence, verbose=False)
-                all_leaves, target_leaf = get_target_leaf(results, w, h)
-
-                if target_leaf:
-                    centroid_2 = target_leaf['centroid']
-                    self.get_logger().info(
-                        f'[VISION] Phase 2 COMPLETE — '
-                        f'centroid_2=({centroid_2[0]}, {centroid_2[1]})')
-                    break
-
-                if (attempt + 1) % 5 == 0:
-                    self.get_logger().info(
-                        f'[VISION] Phase 2 attempt {attempt+1}/{self._max_attempts}: '
-                        f'no target')
+                '[VISION] === USB Phase 2: re-identify same leaf ===')
+            centroid_2, leaf_2 = self._detect_phase2(
+                cap, w, h, gx, gy, centroid_1, task_type)
 
             if centroid_2 is None:
                 self.get_logger().warning(
-                    f'[VISION] Phase 2 FAILED — no leaf in '
-                    f'{self._max_attempts} attempts after arm move. '
+                    f'[VISION] Phase 2 FAILED — could not re-identify the leaf '
+                    f'within {self._detection_timeout:.1f}s. '
                     f'Publishing "not_found".')
                 self._pub_status.publish(String(data='not_found'))
                 return
 
-            # Pixels-per-cm calibration
+            # Pixels-per-cm calibration from the displacement of the SAME leaf
             dist_px = float(np.sqrt(
                 (centroid_2[0] - centroid_1[0]) ** 2 +
                 (centroid_2[1] - centroid_1[1]) ** 2
             ))
 
-            if dist_px < 1.0:
+            calibration_cm = self._calibration_step_m * 100.0
+            if dist_px < 1.0 or calibration_cm <= 0.0:
                 self.get_logger().error(
                     '[VISION] Leaf did NOT move between frames! '
-                    f'pixel_distance={dist_px:.2f} (< 1.0). '
-                    'Calibration invalid. '
-                    'Check: arm actually moved, camera FOV correct.')
+                    f'pixel_distance={dist_px:.2f}. Calibration invalid.')
                 self._pub_status.publish(String(data='not_found'))
                 return
 
-            pixels_per_cm = dist_px
-            dx_px = centroid_2[0] - grabber_x
-            dy_px = centroid_2[1] - grabber_y
+            pixels_per_cm = dist_px / calibration_cm
+            dx_px = centroid_2[0] - gx
+            dy_px = centroid_2[1] - gy
             dx_cm = dx_px / pixels_per_cm
             dy_cm = dy_px / pixels_per_cm
 
             self.get_logger().info(
-                f'[VISION] Calibration: 1 cm = {pixels_per_cm:.2f} px')
+                f'[VISION] Calibration: {calibration_cm:.2f} cm = '
+                f'{dist_px:.2f} px  ->  1 cm = {pixels_per_cm:.2f} px')
             self.get_logger().info(
-                f'[VISION] Offset from grabber: '
+                f'[VISION] Offset from gripper: '
                 f'dx={dx_cm:.2f} cm ({"Right" if dx_cm > 0 else "Left"}), '
                 f'dy={dy_cm:.2f} cm ({"Down" if dy_cm > 0 else "Up"})')
 
@@ -552,6 +612,19 @@ class VisionNode(Node):
                 '[VISION] Published /perception/target_pose and '
                 '/perception/status="found"')
 
+            if self._visualize:
+                ret, final = cap.read()
+                if ret:
+                    draw_leaves(final, [leaf_2] if leaf_2 else [], leaf_2)
+                    draw_grabber_ui(final, gx, gy)
+                    draw_hud(final, [
+                        f'CAM 2 FOUND task={task_type}',
+                        f'1 cm = {pixels_per_cm:.1f} px',
+                        f'offset=({dx_cm:.2f}, {dy_cm:.2f}) cm',
+                    ])
+                    self._show('Anubix - Camera 2 (USB Flange)', final)
+                    time.sleep(1.0)
+
         except Exception as exc:
             self.get_logger().error(
                 f'[VISION] USB camera exception: {exc}\n'
@@ -560,8 +633,162 @@ class VisionNode(Node):
         finally:
             cap.release()
             self.get_logger().info('[VISION] USB camera released')
-            if self._show_preview:
-                cv2.destroyAllWindows()
+            self._close_windows()
+
+    def _detect_phase1(self, cap, w, h, gx, gy, task_type):
+        deadline = time.time() + self._detection_timeout
+        period = self._detection_period()
+        attempt = 0
+
+        while time.time() < deadline:
+            if self._force_stopped:
+                return None, None
+            attempt += 1
+            loop_start = time.time()
+
+            ret, frame = cap.read()
+            if not ret:
+                self._sleep_remainder(loop_start, period)
+                continue
+
+            results = self._model.predict(
+                frame, conf=self._confidence, verbose=False)
+            all_leaves, target_leaf = get_closest_leaf_to_gripper(
+                results, gx, gy)
+
+            if self._visualize:
+                debug = frame.copy()
+                draw_leaves(debug, all_leaves, target_leaf)
+                draw_grabber_ui(debug, gx, gy)
+                if target_leaf:
+                    cx, cy = target_leaf['centroid']
+                    cv2.line(debug, (gx, gy), (cx, cy), (0, 255, 255), 1)
+                remaining = max(0.0, deadline - time.time())
+                draw_hud(debug, [
+                    f'CAM 2 Phase 1 task={task_type}',
+                    f'attempt={attempt} t_left={remaining:0.1f}s',
+                    f'leaves={len(all_leaves)} pick=closest-to-gripper',
+                ])
+                self._show('Anubix - Camera 2 (USB Flange)', debug)
+
+            if target_leaf:
+                centroid = target_leaf['centroid']
+                self.get_logger().info(
+                    f'[VISION] Phase 1 COMPLETE — closest leaf at '
+                    f'centroid=({centroid[0]}, {centroid[1]}) '
+                    f'(took {attempt} attempts)')
+                return centroid, target_leaf
+
+            if attempt % 5 == 0:
+                self.get_logger().info(
+                    f'[VISION] Phase 1 attempt {attempt}: no leaf detected '
+                    f'(t_left={max(0.0, deadline - time.time()):0.1f}s)')
+            self._sleep_remainder(loop_start, period)
+
+        return None, None
+
+    def _detect_phase2(self, cap, w, h, gx, gy, anchor_centroid, task_type):
+        deadline = time.time() + self._detection_timeout
+        period = self._detection_period()
+        attempt = 0
+
+        while time.time() < deadline:
+            if self._force_stopped:
+                return None, None
+            attempt += 1
+            loop_start = time.time()
+
+            ret, frame = cap.read()
+            if not ret:
+                self._sleep_remainder(loop_start, period)
+                continue
+
+            results = self._model.predict(
+                frame, conf=self._confidence, verbose=False)
+            all_leaves, matched, match_dist = match_closest_leaf(
+                results, anchor_centroid, max_dist_px=self._tracking_max_dist)
+
+            if self._visualize:
+                debug = frame.copy()
+                draw_leaves(debug, all_leaves, matched)
+                draw_grabber_ui(debug, gx, gy)
+                ax, ay = anchor_centroid
+                cv2.circle(debug, (int(ax), int(ay)), 8, (0, 200, 255), 2)
+                cv2.putText(debug, 'phase1_centroid', (int(ax) + 10, int(ay)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 255), 1)
+                if matched:
+                    cv2.line(debug, (int(ax), int(ay)),
+                             matched['centroid'], (0, 200, 255), 1)
+                remaining = max(0.0, deadline - time.time())
+                draw_hud(debug, [
+                    f'CAM 2 Phase 2 task={task_type}',
+                    f'attempt={attempt} t_left={remaining:0.1f}s',
+                    f'leaves={len(all_leaves)} match_dist={match_dist:.1f}px '
+                    f'(max={self._tracking_max_dist}px)',
+                ])
+                self._show('Anubix - Camera 2 (USB Flange)', debug)
+
+            if matched:
+                self.get_logger().info(
+                    f'[VISION] Phase 2 COMPLETE — same leaf re-identified at '
+                    f'centroid={matched["centroid"]} '
+                    f'(match_dist={match_dist:.1f}px, attempt={attempt})')
+                return matched['centroid'], matched
+
+            if attempt % 5 == 0:
+                self.get_logger().info(
+                    f'[VISION] Phase 2 attempt {attempt}: no acceptable match '
+                    f'(nearest={match_dist:.1f}px > {self._tracking_max_dist}px)')
+            self._sleep_remainder(loop_start, period)
+
+        return None, None
+
+    def _send_calibration_arm_goal(self) -> bool:
+        """Publish an ABSOLUTE arm pose = (latest pose) + step_m on +X.
+
+        Returns False if we have no recent arm pose to base the move on.
+        """
+        with self._arm_pose_lock:
+            latest = self._latest_arm_pose
+
+        self._arm_event.clear()
+
+        ps = PoseStamped()
+        ps.header.stamp = self.get_clock().now().to_msg()
+        ps.header.frame_id = 'base_link'
+
+        if latest is None:
+            self.get_logger().warning(
+                '[VISION] No /arm/current_pose yet — sending calibration as '
+                'a relative move in the "calibration" frame as a fallback.')
+            ps.header.frame_id = 'calibration'
+            ps.pose.position.x = self._calibration_step_m
+            ps.pose.position.y = 0.0
+            ps.pose.position.z = 0.0
+            ps.pose.orientation.w = 1.0
+        else:
+            ps.pose.position.x = latest.pose.position.x + self._calibration_step_m
+            ps.pose.position.y = latest.pose.position.y
+            ps.pose.position.z = latest.pose.position.z
+            ps.pose.orientation = latest.pose.orientation
+            if ps.pose.orientation.w == 0.0 and ps.pose.orientation.x == 0.0 \
+                    and ps.pose.orientation.y == 0.0 and ps.pose.orientation.z == 0.0:
+                ps.pose.orientation.w = 1.0
+
+        self._pub_arm_goal.publish(ps)
+        self.get_logger().info(
+            f'[VISION] Published calibration arm_nav_goal '
+            f'(absolute={"yes" if latest is not None else "no, fallback"}): '
+            f'x={ps.pose.position.x:.4f} y={ps.pose.position.y:.4f} '
+            f'z={ps.pose.position.z:.4f}')
+        return True
+
+    @staticmethod
+    def _sleep_remainder(loop_start: float, period: float):
+        elapsed = time.time() - loop_start
+        remaining = period - elapsed
+        if remaining > 0:
+            time.sleep(remaining)
 
 
 def main(args=None):

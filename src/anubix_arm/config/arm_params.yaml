@@ -3,6 +3,12 @@ anubix_arm:
     simulate: true
     arm_move_delay: 2.0
     grip_delay: 1.0
+    # Mocked home pose published as /arm/current_pose at startup so the
+    # vision node always has a base to compose calibration moves on.
+    home_x: 0.0
+    home_y: 0.0
+    home_z: 0.3
+    pose_publish_rate_hz: 5.0
     # TODO: Arm hardware parameters
     # arm_controller: "joint_trajectory_controller"
     # gripper_controller: "gripper_action_controller"

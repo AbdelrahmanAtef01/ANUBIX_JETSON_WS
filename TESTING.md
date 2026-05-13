@@ -126,12 +126,14 @@ ros2 topic list
 **Expected topics (partial list):**
 ```
 /supervisor/nav_goal
+/supervisor/nav_vision
 /supervisor/perception_goal
 /supervisor/target_camera
 /supervisor/arm_nav_goal
 /supervisor/grip
 /supervisor/spectral_target
 /supervisor/force_stop
+/arm/current_pose
 /nav/status
 /perception/status
 /perception/target_pose
@@ -312,6 +314,40 @@ ros2 topic echo /perception/target_pose --once
 ## Phase 4: End-to-End Mission Test via OmniLink
 
 This tests the full loop: OmniLink AI → Master → All Stacks → Feedback to AI.
+
+### Supervisor command grammar (what the agent prints)
+
+The agent's reply is parsed for these patterns (case-insensitive). Whatever
+parameters the OmniLink tool definitions need to accept must produce strings
+that match these regexes:
+
+| Command | Example | Meaning |
+|---|---|---|
+| `supervisor/force_stop` | `supervisor/force_stop` | Abort everything |
+| `supervisor/nav_goal_home` | `supervisor/nav_goal_home` | Drive to (home_x, home_y) |
+| `supervisor/nav_goal_<x>_<y>` | `supervisor/nav_goal_3_5` | Drive to (3, 5); vision=False |
+| `supervisor/nav_goal_<x>_<y>_vision-<bool>` | `supervisor/nav_goal_3_5_vision-true` | Drive to (3, 5) but stop 1 m short so the camera can take over |
+| `supervisor/target_camera_<n>` | `supervisor/target_camera_2` | Switch active camera |
+| `supervisor/perception_goal_<task>` | `supervisor/perception_goal_disease` | Run vision for this task |
+| `supervisor/arm_nav_goal_<signal>` | `supervisor/arm_nav_goal_move` | `move` = go to perception target, `home` = retract |
+| `supervisor/grip_<bool>` | `supervisor/grip_true` | Close (`true`) or open (`false`) gripper |
+| `supervisor/spectral_target_<task>` | `supervisor/spectral_target_disease` | Run spectrometer (no IDs — uses node defaults) |
+| `supervisor/spectral_target_<task>\|<robot_id>\|<task_id>` | `supervisor/spectral_target_disease\|34a957fd-...\|40e4060b-...` | Run spectrometer and tag the Supabase row with these UUIDs |
+
+### OmniLink tool definitions
+
+Two tools accept extra fields that must be reflected in the OmniLink web UI:
+
+- **`navigate`** — add a boolean argument `vision` (default `false`).
+  When the tool fires, the agent text must include
+  `supervisor/nav_goal_<x>_<y>_vision-<true|false>`. If `vision: true` the
+  RPi nav stack stops `vision_standoff_m` (default 1.0 m) short of the goal.
+
+- **`spectrometer`** — add two string arguments `robot_id` and `task_id`
+  (UUIDs). When the tool fires, the agent text must include
+  `supervisor/spectral_target_<task>|<robot_id>|<task_id>`. Those IDs are
+  forwarded all the way to the Supabase row so each reading is attributed
+  to the correct robot and task without relying on hardcoded defaults.
 
 ### On the OmniLink Web UI
 

@@ -159,9 +159,29 @@ class SupabaseUploaderNode(Node):
             f'value={payload.get("value","?")}  '
             f'confidence={payload.get("confidence","?")}')
 
+        # Prefer IDs supplied by OmniLink (forwarded through the
+        # spectrometer payload). Fall back to the node parameters only if
+        # the payload omitted them, so we never silently overwrite a real
+        # robot/task UUID with a hardcoded default.
+        payload_robot_id = (payload.get('robot_id') or '').strip()
+        payload_task_id  = (payload.get('task_id')  or '').strip()
+        robot_id = payload_robot_id or self._robot_id
+        task_id  = payload_task_id  or self._task_id
+
+        if not payload_robot_id or not payload_task_id:
+            self.get_logger().warning(
+                f'[SUPABASE] Spectrometer payload missing IDs '
+                f'(robot_id={payload_robot_id!r}, task_id={payload_task_id!r}) — '
+                f'falling back to node params robot_id={self._robot_id!r}, '
+                f'task_id={self._task_id!r}')
+        else:
+            self.get_logger().info(
+                f'[SUPABASE] Using IDs from spectrometer payload: '
+                f'robot_id={robot_id!r} task_id={task_id!r}')
+
         context = {
-            'robot_id':       self._robot_id,
-            'task_id':        self._task_id,
+            'robot_id':       robot_id,
+            'task_id':        task_id,
             'plant_location': self._plant_location,
         }
 

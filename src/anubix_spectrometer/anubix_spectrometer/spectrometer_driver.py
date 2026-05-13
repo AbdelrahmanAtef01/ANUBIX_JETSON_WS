@@ -10,17 +10,19 @@ Supported task types:
   - disease:         Spectral signature matching for plant disease
   - harvest_status:  Chlorophyll/carotenoid ratio for ripeness
 
-Hardware: USB/UART spectrometer (257 channels, ~3921-7407 wavelength range)
+Hardware: TCP/IP spectrometer over USB-Ethernet gadget
+          (257 channels, ~3921-7407 wavelength range, default 192.168.137.2:5555)
 Background calibration: bg.csv (dark/reference spectrum)
 
 Usage standalone (testing without ROS):
-    python3 spectrometer.py --port /dev/ttyUSB0 --task water_stress
+    python3 spectrometer.py --host 192.168.137.2 --task water_stress
     python3 spectrometer.py --simulate --task disease
 """
 
 import os
 import csv
 import time
+import socket
 import struct
 import logging
 import argparse
@@ -113,64 +115,97 @@ class BackgroundCalibration:
 
 class SpectrometerDevice:
     """
-    Interface to the physical spectrometer over serial/USB.
+    Interface to the physical spectrometer over TCP/IP.
 
-    Protocol (configurable):
-      - Send trigger byte to initiate reading
-      - Receive N_CHANNELS * 4 bytes (float32 little-endian PSD values)
-      - Or: receive ASCII CSV line with comma-separated values
+    The sensor exposes a USB Ethernet gadget at a fixed static address
+    (default 192.168.137.2:5555). We open a TCP socket, send an ASCII
+    command, and read back either a binary float32 block or an ASCII
+    CSV line — same wire protocol as the previous serial driver.
 
-    For testing without hardware, use SimulatedSpectrometer instead.
+    Use SimulatedSpectrometer for tests without hardware.
     """
 
-    def __init__(self, port: str = '/dev/ttyUSB0', baud_rate: int = 115200,
+    def __init__(self, host: str = '192.168.137.2', tcp_port: int = 5555,
                  num_channels: int = 257, protocol: str = 'binary',
-                 integration_time_ms: int = 100):
-        self.port = port
-        self.baud_rate = baud_rate
+                 integration_time_ms: int = 100, connect_timeout_s: float = 5.0,
+                 read_timeout_s: float = 5.0):
+        self.host = host
+        self.tcp_port = tcp_port
         self.num_channels = num_channels
         self.protocol = protocol
         self.integration_time_ms = integration_time_ms
-        self._serial = None
+        self.connect_timeout_s = connect_timeout_s
+        self.read_timeout_s = read_timeout_s
+        self._sock: Optional[socket.socket] = None
         self._lock = threading.Lock()
 
     def connect(self):
-        """Open serial connection to spectrometer."""
-        import serial
-        self._serial = serial.Serial(
-            port=self.port,
-            baudrate=self.baud_rate,
-            timeout=5.0,
-            bytesize=serial.EIGHTBITS,
-            parity=serial.PARITY_NONE,
-            stopbits=serial.STOPBITS_ONE,
-        )
-        time.sleep(0.5)
-        self._serial.reset_input_buffer()
-        log.info(f"[HW] Connected to spectrometer on {self.port} @ {self.baud_rate}")
-
+        """Open TCP connection to the spectrometer."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(self.connect_timeout_s)
+        try:
+            sock.connect((self.host, self.tcp_port))
+        except OSError as e:
+            sock.close()
+            raise ConnectionError(
+                f"Could not reach spectrometer at {self.host}:{self.tcp_port}: {e}"
+            ) from e
+        sock.settimeout(self.read_timeout_s)
+        # Disable Nagle so single-byte commands flush immediately.
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+        self._sock = sock
+        log.info(f"[HW] Connected to spectrometer at "
+                 f"{self.host}:{self.tcp_port}")
+        self._drain()
         self._send_integration_time()
 
     def disconnect(self):
-        """Close serial connection."""
-        if self._serial and self._serial.is_open:
-            self._serial.close()
+        """Close TCP connection."""
+        if self._sock is not None:
+            try:
+                self._sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            self._sock.close()
+            self._sock = None
             log.info("[HW] Disconnected from spectrometer")
+
+    def _drain(self):
+        """Discard anything buffered in the socket before a fresh exchange."""
+        if self._sock is None:
+            return
+        self._sock.settimeout(0.05)
+        try:
+            while True:
+                chunk = self._sock.recv(4096)
+                if not chunk:
+                    break
+        except (socket.timeout, BlockingIOError, OSError):
+            pass
+        finally:
+            self._sock.settimeout(self.read_timeout_s)
 
     def _send_integration_time(self):
         """Configure integration time on the sensor."""
+        if self._sock is None:
+            return
         with self._lock:
             cmd = f"INT:{self.integration_time_ms}\n".encode('ascii')
-            self._serial.write(cmd)
+            self._sock.sendall(cmd)
             time.sleep(0.1)
-            resp = self._serial.readline().decode('ascii').strip()
+            resp = self._read_line(timeout=1.0)
             if resp:
                 log.info(f"[HW] Integration time set: {resp}")
 
     def read_spectrum(self) -> np.ndarray:
         """Trigger a reading and return raw PSD array."""
+        if self._sock is None:
+            raise ConnectionError("Spectrometer socket not connected")
         with self._lock:
-            self._serial.write(b'READ\n')
+            self._sock.sendall(b'READ\n')
 
             if self.protocol == 'binary':
                 data = self._read_binary()
@@ -179,29 +214,60 @@ class SpectrometerDevice:
 
         return data
 
+    def _read_exact(self, n: int) -> bytes:
+        """Block until ``n`` bytes have been received."""
+        buf = bytearray()
+        start = time.time()
+        while len(buf) < n:
+            try:
+                chunk = self._sock.recv(n - len(buf))
+            except socket.timeout:
+                if time.time() - start > self.read_timeout_s:
+                    raise TimeoutError(
+                        f"Spectrometer read timed out after "
+                        f"{self.read_timeout_s:.1f}s "
+                        f"({len(buf)}/{n} bytes)")
+                continue
+            if not chunk:
+                raise ConnectionError(
+                    "Spectrometer closed the connection mid-read")
+            buf.extend(chunk)
+        return bytes(buf)
+
+    def _read_line(self, timeout: Optional[float] = None) -> str:
+        """Read a single \\n-terminated ASCII line from the socket."""
+        if timeout is not None:
+            self._sock.settimeout(timeout)
+        line = bytearray()
+        try:
+            while True:
+                ch = self._sock.recv(1)
+                if not ch:
+                    break
+                if ch == b'\n':
+                    break
+                line.extend(ch)
+        except socket.timeout:
+            pass
+        finally:
+            self._sock.settimeout(self.read_timeout_s)
+        return line.decode('ascii', errors='replace').strip()
+
     def _read_binary(self) -> np.ndarray:
         """Read binary float32 data from device."""
         expected_bytes = self.num_channels * 4
-        raw = b''
-        start = time.time()
-        while len(raw) < expected_bytes:
-            chunk = self._serial.read(expected_bytes - len(raw))
-            if not chunk:
-                if time.time() - start > 5.0:
-                    raise TimeoutError("Spectrometer read timed out")
-                continue
-            raw += chunk
+        raw = self._read_exact(expected_bytes)
         return np.frombuffer(raw, dtype=np.float32)
 
     def _read_ascii(self) -> np.ndarray:
         """Read ASCII CSV line from device."""
-        line = self._serial.readline().decode('ascii').strip()
-        values = [float(v) for v in line.split(',')]
+        line = self._read_line()
+        values = [float(v) for v in line.split(',') if v.strip()]
         return np.array(values)
 
     @property
     def is_connected(self) -> bool:
-        return self._serial is not None and self._serial.is_open
+        return self._sock is not None
 
 
 class SimulatedSpectrometer:
@@ -586,10 +652,10 @@ class SpectrometerPipeline:
 
 def main():
     parser = argparse.ArgumentParser(description='ANUBIX Spectrometer Driver')
-    parser.add_argument('--port', default='/dev/ttyUSB0',
-                        help='Serial port for spectrometer')
-    parser.add_argument('--baud', type=int, default=115200,
-                        help='Baud rate')
+    parser.add_argument('--host', default='192.168.137.2',
+                        help='Spectrometer IP (USB-Ethernet gadget)')
+    parser.add_argument('--tcp-port', type=int, default=5555,
+                        help='Spectrometer TCP port')
     parser.add_argument('--task', required=True,
                         choices=['water_stress', 'disease', 'harvest_status'],
                         help='Analysis task type')
@@ -617,8 +683,8 @@ def main():
     device = None
     if not args.simulate:
         device = SpectrometerDevice(
-            port=args.port,
-            baud_rate=args.baud,
+            host=args.host,
+            tcp_port=args.tcp_port,
             num_channels=257,
         )
 
@@ -636,7 +702,7 @@ def main():
 
     print(f"{'='*50}")
     print(f"  ANUBIX Spectrometer - {args.task}")
-    print(f"  Mode: {'Simulated' if args.simulate else args.port}")
+    print(f"  Mode: {'Simulated' if args.simulate else f'{args.host}:{args.tcp_port}'}")
     print(f"{'='*50}")
 
     pipeline.connect()

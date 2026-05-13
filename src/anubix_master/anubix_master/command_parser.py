@@ -7,11 +7,16 @@ Extracts structured commands from ANUBIX agent text responses.
 import re
 from typing import List, Tuple
 
+# UUID pattern fragment (relaxed: allows any hex+dash combo of plausible length)
+_UUID_FRAG = r'[A-Za-z0-9\-]{8,}'
+
 CMD_PATTERNS = [
     ("force_stop", re.compile(r'supervisor/force_stop', re.IGNORECASE)),
     ("nav_goal_home", re.compile(r'supervisor/nav_goal_home(?:_home)?', re.IGNORECASE)),
+    # nav_goal: x_y or x_y_vision-true/false
     ("nav_goal", re.compile(
-        r'supervisor/nav_goal_([-\d]+(?:\.\d+)?)_([-\d]+(?:\.\d+)?)',
+        r'supervisor/nav_goal_([-\d]+(?:\.\d+)?)_([-\d]+(?:\.\d+)?)'
+        r'(?:_vision[-_](true|false))?',
         re.IGNORECASE)),
     ("perception_goal", re.compile(
         r'supervisor/perception_goal_([a-z][a-z_]*)',
@@ -25,8 +30,12 @@ CMD_PATTERNS = [
     ("grip", re.compile(
         r'supervisor/grip_(true|false)',
         re.IGNORECASE)),
+    # spectral_target: task                                (legacy)
+    #                  task|robot_id|task_id              (preferred)
     ("spectral_target", re.compile(
-        r'supervisor/spectral_target_([a-z][a-z_]*)',
+        r'supervisor/spectral_target_([a-z][a-z_]*)'
+        r'(?:\|(' + _UUID_FRAG + r'))?'
+        r'(?:\|(' + _UUID_FRAG + r'))?',
         re.IGNORECASE)),
 ]
 

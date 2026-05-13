@@ -10,11 +10,31 @@ anubix_vision:
     # USB camera device index (VideoCapture index, port 0 by default)
     usb_camera_index: 0
 
-    # Set to true only if a display is attached to the Jetson (e.g. debugging)
-    show_preview: false
+    # Live debug overlay (feed + detections + selected leaf + gripper + status).
+    # Requires a display; safe to leave true on a headless box (errors are
+    # logged at DEBUG and ignored).
+    visualize: false
 
-    # Maximum frames to examine before declaring not_found in each phase
-    detection_max_attempts: 30
+    # Detection is time-bounded: keep retrying up to this many seconds.
+    detection_timeout_s: 30.0
+    # Detection poll rate while waiting (2.0 Hz = "twice per second").
+    detection_rate_hz: 2.0
 
-    # Seconds to wait for /arm/arm_status: success during USB calibration
+    # Seconds to wait for /arm/arm_status: success during USB calibration.
     arm_move_timeout_s: 30.0
+
+    # Pixel position of the gripper in each camera's image.
+    # Use -1 to default to the centre of the live frame. Override with the
+    # measured gripper centre (in pixels) after calibration.
+    gripper_px_x_cam1: -1
+    gripper_px_y_cam1: -1
+    gripper_px_x_cam2: -1
+    gripper_px_y_cam2: -1
+
+    # Camera 2: maximum pixel distance allowed when re-identifying the
+    # same leaf in the second frame. Smaller = stricter tracking.
+    tracking_max_dist_px: 200
+
+    # Camera 2: calibration step the arm is asked to perform on +X to
+    # establish px-per-cm. 0.01 m = 1 cm.
+    calibration_step_m: 0.01

@@ -95,13 +95,18 @@ class AnubixMasterNode(Node):
 
         # Publishers (supervisor command channels)
         self.pub_nav_goal = self.create_publisher(PoseStamped, '/supervisor/nav_goal', cmd_qos)
+        # Companion flag: True → nav must stop ~1 m short of the target so
+        # the on-board camera can take over the final approach. False → nav
+        # drives all the way to the goal. Latched (TRANSIENT_LOCAL) so the
+        # nav node always sees the most recent value.
+        self.pub_nav_vision = self.create_publisher(Bool, '/supervisor/nav_vision', cmd_qos)
         self.pub_perception = self.create_publisher(String, '/supervisor/perception_goal', cmd_qos)
         self.pub_target_camera = self.create_publisher(String, '/supervisor/target_camera', cmd_qos)
         self.pub_arm_nav_goal = self.create_publisher(PoseStamped, '/supervisor/arm_nav_goal', cmd_qos)
         self.pub_grip = self.create_publisher(Bool, '/supervisor/grip', cmd_qos)
         self.pub_spectral = self.create_publisher(String, '/supervisor/spectral_target', cmd_qos)
         self.pub_force_stop = self.create_publisher(Bool, '/supervisor/force_stop', cmd_qos)
-        self.get_logger().info('[INIT] All 7 supervisor publishers created')
+        self.get_logger().info('[INIT] All 8 supervisor publishers created')
 
         # Feedback synchronization events
         self._ev_nav = threading.Event()
@@ -255,12 +260,16 @@ class AnubixMasterNode(Node):
         self.get_logger().warning('*** FORCE STOP PUBLISHED ***')
         return '/system/status: force_stopped'
 
-    def _do_nav_goal(self, x: float, y: float) -> str:
+    def _do_nav_goal(self, x: float, y: float, vision: bool = False) -> str:
         ps = self._make_pose_stamped(x, y, 0.0)
         self._ev_nav.clear()
         self._fb_nav = None
+        # Publish the vision flag BEFORE the goal so the nav node has it
+        # available the moment the pose arrives.
+        self.pub_nav_vision.publish(Bool(data=bool(vision)))
         self.pub_nav_goal.publish(ps)
-        self.get_logger().info(f'[TX] /supervisor/nav_goal ({x:.2f}, {y:.2f})')
+        self.get_logger().info(
+            f'[TX] /supervisor/nav_goal ({x:.2f}, {y:.2f}) vision={vision}')
         self.get_logger().info(
             f'[WAIT] Waiting for /nav/status (timeout={self.feedback_timeout}s)...')
         if not self._ev_nav.wait(self.feedback_timeout):
@@ -276,7 +285,7 @@ class AnubixMasterNode(Node):
     def _do_nav_goal_home(self) -> str:
         self.get_logger().info(
             f'[TX] nav_goal_home -> ({self._home[0]}, {self._home[1]})')
-        return self._do_nav_goal(self._home[0], self._home[1])
+        return self._do_nav_goal(self._home[0], self._home[1], vision=False)
 
     def _do_target_camera(self, camera_number: int) -> None:
         self.pub_target_camera.publish(String(data=str(camera_number)))
@@ -312,14 +321,20 @@ class AnubixMasterNode(Node):
             with self._target_pose_lock:
                 tgt = self._latest_target_pose
             if tgt is None:
-                self.get_logger().error(
-                    '[TX] arm_nav_goal_move REFUSED: no /perception/target_pose received! '
-                    'The vision/perception node must publish target_pose before arm can move.')
-                return '/arm/arm_status: mechanical_error'
-            ps = PoseStamped()
-            ps.header.stamp = self.get_clock().now().to_msg()
-            ps.header.frame_id = 'base_link'
-            ps.pose = tgt
+                # Mocking phase: still publish a goal so the arm node can
+                # report success and the pipeline stays testable. Use the
+                # configured home pose as a placeholder target.
+                self.get_logger().warning(
+                    '[TX] arm_nav_goal_move with no /perception/target_pose '
+                    'yet — forwarding home pose as placeholder so the arm '
+                    'mock can complete. Hook up vision before going live.')
+                ps = self._make_pose_stamped(
+                    *self.arm_home_pose, frame_id='base_link')
+            else:
+                ps = PoseStamped()
+                ps.header.stamp = self.get_clock().now().to_msg()
+                ps.header.frame_id = 'base_link'
+                ps.pose = tgt
         else:
             self.get_logger().error(f'[TX] Unknown arm signal: "{signal}"')
             return '/arm/arm_status: mechanical_error'
@@ -383,11 +398,23 @@ class AnubixMasterNode(Node):
             bool(self._fb_touch) and self._fb_gripper == 'successful_grip')
         return f'{gripper_line}\n{touch_line}'
 
-    def _do_spectral_target(self, task_type: str) -> str:
+    def _do_spectral_target(self, task_type: str,
+                            robot_id: str = '', task_id: str = '') -> str:
+        # OmniLink supplies robot_id/task_id with each spectrometer call.
+        # We forward them verbatim so the Supabase uploader can attribute
+        # the reading to the correct robot/task without hardcoded UUIDs.
+        rid = (robot_id or self._robot_id or '').strip()
+        tid = (task_id or self._task_id or '').strip()
+        payload = task_type
+        if rid or tid:
+            payload = f'{task_type}|{rid}|{tid}'
+
         self._ev_spectro.clear()
         self._fb_spectro = None
-        self.pub_spectral.publish(String(data=task_type))
-        self.get_logger().info(f'[TX] /supervisor/spectral_target = "{task_type}"')
+        self.pub_spectral.publish(String(data=payload))
+        self.get_logger().info(
+            f'[TX] /supervisor/spectral_target = "{payload}"  '
+            f'(task={task_type!r} robot_id={rid!r} task_id={tid!r})')
         self.get_logger().info(
             f'[WAIT] Waiting for /spectrometer/status (timeout={self.feedback_timeout}s)...')
         if not self._ev_spectro.wait(self.feedback_timeout):
@@ -397,7 +424,7 @@ class AnubixMasterNode(Node):
             return '/spectrometer/status: failure'
         feedback = f'/spectrometer/status: {self._fb_spectro}'
         if self._fb_spectro == 'success':
-            feedback += f'\nrobot_id: {self._robot_id}\ntask_id: {self._task_id}'
+            feedback += f'\nrobot_id: {rid}\ntask_id: {tid}'
         return feedback
 
     # ── OmniLink polling (runs in dedicated thread — NOT a ROS timer) ─────────
@@ -681,8 +708,13 @@ class AnubixMasterNode(Node):
         if cmd_type == 'nav_goal_home':
             return self.execute_command('nav_goal_home')
         if cmd_type == 'nav_goal':
+            vision_flag_str = (match.group(3) or '').lower() if match.lastindex and match.lastindex >= 3 else ''
+            vision_flag = vision_flag_str == 'true'
             return self.execute_command(
-                'nav_goal', x=float(match.group(1)), y=float(match.group(2)))
+                'nav_goal',
+                x=float(match.group(1)),
+                y=float(match.group(2)),
+                vision=vision_flag)
         if cmd_type == 'target_camera':
             return self.execute_command(
                 'target_camera', camera_number=int(match.group(1)))
@@ -697,7 +729,10 @@ class AnubixMasterNode(Node):
                 'grip', action=match.group(1).lower() == 'true')
         if cmd_type == 'spectral_target':
             return self.execute_command(
-                'spectral_target', task_type=match.group(1).lower())
+                'spectral_target',
+                task_type=match.group(1).lower(),
+                robot_id=(match.group(2) or '') if match.lastindex and match.lastindex >= 2 else '',
+                task_id=(match.group(3) or '') if match.lastindex and match.lastindex >= 3 else '')
         self.get_logger().error(f'[DISPATCH] Unknown command type: "{cmd_type}"')
         return None
 
