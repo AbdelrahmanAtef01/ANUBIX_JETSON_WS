@@ -46,16 +46,21 @@ class SpectrometerNode(Node):
         super().__init__('anubix_spectrometer')
 
         # Parameters
-        # The spectrometer presents itself as a USB-Ethernet gadget — the
-        # Jetson talks to it over TCP/IP, NOT serial. The sensor exposes
-        # two ports: read_port (data in) and write_port (commands out).
+        # Si-NIR Communication Service rev 1: USB-Ethernet gadget, two TCP
+        # ports (write=5000 for commands, read=5001 for responses). See
+        # Si-NIR_Communication_Service_r1.pdf §1.
         self.declare_parameter('host', '192.168.137.2')
-        self.declare_parameter('read_port', 5000)
-        self.declare_parameter('write_port', 5001)
+        self.declare_parameter('read_port', 5001)
+        self.declare_parameter('write_port', 5000)
         self.declare_parameter('num_channels', 257)
         self.declare_parameter('integration_time_ms', 100)
+        # Si-NIR runPSD knobs (spec §2.1, §2.2.4)
+        self.declare_parameter('zero_padding', 2)      # 1=8k, 2=16k, 3=32k
+        self.declare_parameter('optical_gain', 0)      # 0=saved, 1=calc, 2=ext
+        self.declare_parameter('apodization', 2)       # 0=Boxcar..3=Lorenz
+        self.declare_parameter('verbose_debug', True)  # hex-dump TX/RX in logs
         self.declare_parameter('connect_timeout_s', 5.0)
-        self.declare_parameter('read_timeout_s', 5.0)
+        self.declare_parameter('read_timeout_s', 15.0)
         self.declare_parameter('bg_file', '')
 
         self._host = self.get_parameter('host').value
@@ -63,6 +68,10 @@ class SpectrometerNode(Node):
         self._write_port = int(self.get_parameter('write_port').value)
         self._num_channels = self.get_parameter('num_channels').value
         self._integration_time_ms = self.get_parameter('integration_time_ms').value
+        self._zero_padding = int(self.get_parameter('zero_padding').value)
+        self._optical_gain = int(self.get_parameter('optical_gain').value)
+        self._apodization = int(self.get_parameter('apodization').value)
+        self._verbose_debug = bool(self.get_parameter('verbose_debug').value)
         self._connect_timeout_s = float(self.get_parameter('connect_timeout_s').value)
         self._read_timeout_s = float(self.get_parameter('read_timeout_s').value)
         bg_file_param = self.get_parameter('bg_file').value
@@ -123,8 +132,12 @@ class SpectrometerNode(Node):
             write_port=self._write_port,
             num_channels=self._num_channels,
             integration_time_ms=self._integration_time_ms,
+            zero_padding=self._zero_padding,
+            optical_gain=self._optical_gain,
+            apodization=self._apodization,
             connect_timeout_s=self._connect_timeout_s,
             read_timeout_s=self._read_timeout_s,
+            verbose_debug=self._verbose_debug,
         )
 
         self._pipeline = SpectrometerPipeline(

@@ -1,25 +1,32 @@
 #!/usr/bin/env python3
 """
-ANUBIX Spectrometer Driver
-============================
-Handles communication with the physical spectrometer sensor,
-background subtraction, and spectral analysis for crop health assessment.
+ANUBIX Spectrometer Driver — Si-NIR sensor over TCP/IP
+=======================================================
+Implements the Si-NIR Communication Service rev 1 wire protocol over the
+sensor's USB-Ethernet gadget (default 192.168.137.2, write=5000, read=5001),
+then layers the bench-tested dark-current subtraction + crop-health analysis
+on top of it.
 
 Supported task types:
   - water_stress:    NDVI-based water stress index from reflectance
   - disease:         Spectral signature matching for plant disease
   - harvest_status:  Chlorophyll/carotenoid ratio for ripeness
 
-Hardware: TCP/IP spectrometer over USB-Ethernet gadget
-          (257 channels, ~3921-7407 wavelength range, default host 192.168.137.2)
-          The sensor exposes two TCP ports:
-            - 5000  read  (spectrum data + ASCII acks flow from device → host)
-            - 5001  write (commands like INT:/READ flow from host → device)
-Background calibration: bg.csv (dark/reference spectrum)
+Si-NIR wire protocol (see Si-NIR_Communication_Service_r1.pdf):
+  TX command   = u32 length=192 + 48 × i32 little-endian fields
+                 (operation, resolution, mode, zeroPadding, scanTime,
+                  commonWavNum, opticalGain, apodizationSel,
+                  GeneralData[40])
+  RX runPSD    = u32 status + u32 length
+                 + i64 PSD[4096] + i64 Wavenumber[4096]
+                 PSD /= 2**33,   Wavenumber /= 2**30
+The user reports minor doc inaccuracies, so the driver logs full hex dumps
+of every TX/RX and also reports the first PSD samples interpreted as BOTH
+int64/2**33 (per spec) and float64 (so a wrong-type guess is visible).
 
-Usage standalone (testing without ROS):
-    python3 spectrometer.py --host 192.168.137.2 --task water_stress
-    python3 spectrometer.py --host 192.168.137.2 --read-port 5000 --write-port 5001 --task water_stress
+Usage standalone:
+    python3 spectrometer_driver.py --task water_stress
+    python3 spectrometer_driver.py --host 192.168.137.2 --task disease
 """
 
 import os
@@ -118,179 +125,360 @@ class BackgroundCalibration:
 
 class SpectrometerDevice:
     """
-    Interface to the physical spectrometer over TCP/IP.
+    Interface to the Si-NIR sensor over TCP/IP (spec rev 1).
 
-    The sensor exposes a USB Ethernet gadget at a fixed static address
-    (default host 192.168.137.2) with two distinct TCP endpoints:
-      - read_port  (default 5000): inbound data — spectrum bytes + ASCII acks
-      - write_port (default 5001): outbound commands — INT:/READ
+    The sensor presents itself as a USB-Ethernet gadget at 192.168.137.2
+    with two TCP ports:
+        write_port = 5000  — host → sensor (binary command packets)
+        read_port  = 5001  — sensor → host (binary response packets)
 
-    We open one socket per direction. Commands are written on the write
-    socket; spectrum data and any responses are read from the read socket.
+    Command packet:
+        [u32 length=192][48 × i32 LE fields]
+        fields = operation, resolution, mode, zeroPadding, scanTime,
+                 commonWavNum, opticalGain, apodizationSel, GeneralData[40]
+
+    runPSD (op 3) response:
+        [u32 status][u32 length]
+        [i64 PSD × 4096][i64 Wavenumber × 4096]
+        PSD /= 2**33,  Wavenumber /= 2**30
     """
 
-    def __init__(self, host: str = '192.168.137.2',
-                 read_port: int = 5000, write_port: int = 5001,
-                 num_channels: int = 257, protocol: str = 'binary',
-                 integration_time_ms: int = 100, connect_timeout_s: float = 5.0,
-                 read_timeout_s: float = 5.0):
+    # Operation codes (spec §2.2)
+    OP_READ_MODULE_ID = 1
+    OP_CHECK_BOARD = 2
+    OP_RUN_PSD = 3
+    OP_RUN_BACKGROUND = 4
+    OP_RUN_SPECTRUM = 5
+    OP_READ_SW_VERSION = 14
+
+    PACKET_NUM_INTS = 48
+    GENERAL_DATA_LEN = 40
+
+    PSD_BUFFER_SAMPLES = 4096
+    PSD_BUFFER_BYTES = PSD_BUFFER_SAMPLES * 8
+
+    PSD_DEQUANT = float(1 << 33)
+    WN_DEQUANT = float(1 << 30)
+
+    # commonWavNum → point count (spec §2.1)
+    COMMON_WAV_POINTS = {0: 0, 1: 65, 2: 129, 3: 257, 4: 513,
+                         5: 1024, 6: 2048, 7: 4096}
+
+    def __init__(self,
+                 host: str = '192.168.137.2',
+                 read_port: int = 5001,
+                 write_port: int = 5000,
+                 num_channels: int = 257,
+                 integration_time_ms: int = 100,
+                 zero_padding: int = 2,
+                 optical_gain: int = 0,
+                 apodization: int = 2,
+                 connect_timeout_s: float = 5.0,
+                 read_timeout_s: float = 15.0,
+                 verbose_debug: bool = True):
         self.host = host
-        self.read_port = read_port
-        self.write_port = write_port
-        self.num_channels = num_channels
-        self.protocol = protocol
-        self.integration_time_ms = integration_time_ms
-        self.connect_timeout_s = connect_timeout_s
-        self.read_timeout_s = read_timeout_s
+        self.read_port = int(read_port)
+        self.write_port = int(write_port)
+        self.num_channels = int(num_channels)
+        self.integration_time_ms = int(integration_time_ms)
+        self.zero_padding = int(zero_padding)
+        self.optical_gain = int(optical_gain)
+        self.apodization = int(apodization)
+        self.connect_timeout_s = float(connect_timeout_s)
+        self.read_timeout_s = float(read_timeout_s)
+        self.verbose = bool(verbose_debug)
+
+        # scanTime allowed range per spec §2.1: 10..224 ms
+        self._scan_time_ms = max(10, min(224, self.integration_time_ms))
+        if self._scan_time_ms != self.integration_time_ms:
+            log.warning(
+                f"[HW] scanTime clamped {self.integration_time_ms}"
+                f"→{self._scan_time_ms} ms (Si-NIR allowed: 10..224)")
+
+        # Pick commonWavNum that matches the configured channel count
+        self._common_wav_num = next(
+            (c for c, n in self.COMMON_WAV_POINTS.items()
+             if n == self.num_channels),
+            3,
+        )
+        chosen_n = self.COMMON_WAV_POINTS.get(self._common_wav_num)
+        if chosen_n != self.num_channels:
+            log.warning(
+                f"[HW] num_channels={self.num_channels} has no exact "
+                f"commonWavNum match; using commonWavNum="
+                f"{self._common_wav_num} ({chosen_n} pts)")
+
         self._read_sock: Optional[socket.socket] = None
         self._write_sock: Optional[socket.socket] = None
         self._lock = threading.Lock()
+        self.last_wavenumber: Optional[np.ndarray] = None
+
+    # ────────────────── socket lifecycle ──────────────────
 
     def _open_sock(self, port: int, label: str) -> socket.socket:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(self.connect_timeout_s)
+        log.info(f"[HW] Opening {label} socket → {self.host}:{port} "
+                 f"(connect_timeout={self.connect_timeout_s}s)")
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(self.connect_timeout_s)
         try:
-            sock.connect((self.host, port))
+            s.connect((self.host, port))
         except OSError as e:
-            sock.close()
+            s.close()
             raise ConnectionError(
-                f"Could not reach spectrometer {label} socket "
-                f"at {self.host}:{port}: {e}"
-            ) from e
-        sock.settimeout(self.read_timeout_s)
-        # Disable Nagle so single-byte commands flush immediately.
+                f"Could not reach Si-NIR {label} port at "
+                f"{self.host}:{port}: {e}") from e
+        s.settimeout(self.read_timeout_s)
         try:
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except OSError:
             pass
-        return sock
+        log.info(f"[HW] {label} socket connected")
+        return s
 
     def connect(self):
-        """Open both TCP connections to the spectrometer."""
-        self._read_sock = self._open_sock(self.read_port, "read")
+        """Open both sockets and best-effort identify the sensor."""
+        # Open READ first — the sensor likely expects the read channel
+        # ready before it processes a command on the write channel.
+        self._read_sock = self._open_sock(self.read_port, "READ")
         try:
-            self._write_sock = self._open_sock(self.write_port, "write")
+            self._write_sock = self._open_sock(self.write_port, "WRITE")
         except ConnectionError:
-            # If write-port fails, close the read socket so we don't leak it.
             try:
                 self._read_sock.close()
             finally:
                 self._read_sock = None
             raise
-        log.info(f"[HW] Connected to spectrometer at {self.host} "
-                 f"(read={self.read_port}, write={self.write_port})")
-        self._drain()
-        self._send_integration_time()
+        log.info(f"[HW] Si-NIR sockets up @ {self.host} "
+                 f"(write={self.write_port}, read={self.read_port})")
+
+        self._drain_read_buffer(max_bytes=256, timeout=0.3)
+
+        # Probe operations. Log everything; do NOT fail connect on a probe
+        # mismatch — the user warned the doc has minor inaccuracies, so we
+        # want the per-operation truth in the terminal even if a probe is
+        # slightly off.
+        try:
+            mid = self.read_module_id()
+            log.info(f"[HW] Module ID: {mid!r}")
+        except Exception as e:
+            log.warning(f"[HW] readModuleID skipped: {e!r}")
+
+        try:
+            st = self.check_board()
+            log.info(f"[HW] checkBoard status=0x{st:02x} "
+                     f"({'READY' if st == 1 else 'NOT-READY/UNKNOWN'})")
+        except Exception as e:
+            log.warning(f"[HW] checkBoard skipped: {e!r}")
 
     def disconnect(self):
-        """Close both TCP connections."""
         for attr in ('_read_sock', '_write_sock'):
-            sock = getattr(self, attr)
-            if sock is not None:
-                try:
-                    sock.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
-                sock.close()
-                setattr(self, attr, None)
-        log.info("[HW] Disconnected from spectrometer")
-
-    def _drain(self):
-        """Discard anything buffered on the read socket before a fresh exchange."""
-        if self._read_sock is None:
-            return
-        self._read_sock.settimeout(0.05)
-        try:
-            while True:
-                chunk = self._read_sock.recv(4096)
-                if not chunk:
-                    break
-        except (socket.timeout, BlockingIOError, OSError):
-            pass
-        finally:
-            self._read_sock.settimeout(self.read_timeout_s)
-
-    def _send_integration_time(self):
-        """Configure integration time on the sensor."""
-        if self._write_sock is None:
-            return
-        with self._lock:
-            cmd = f"INT:{self.integration_time_ms}\n".encode('ascii')
-            self._write_sock.sendall(cmd)
-            time.sleep(0.1)
-            # Ack (if any) is published on the read socket.
-            resp = self._read_line(timeout=1.0)
-            if resp:
-                log.info(f"[HW] Integration time set: {resp}")
-
-    def read_spectrum(self) -> np.ndarray:
-        """Trigger a reading and return raw PSD array."""
-        if self._read_sock is None or self._write_sock is None:
-            raise ConnectionError("Spectrometer sockets not connected")
-        with self._lock:
-            self._write_sock.sendall(b'READ\n')
-
-            if self.protocol == 'binary':
-                data = self._read_binary()
-            else:
-                data = self._read_ascii()
-
-        return data
-
-    def _read_exact(self, n: int) -> bytes:
-        """Block until ``n`` bytes have been received on the read socket."""
-        buf = bytearray()
-        start = time.time()
-        while len(buf) < n:
-            try:
-                chunk = self._read_sock.recv(n - len(buf))
-            except socket.timeout:
-                if time.time() - start > self.read_timeout_s:
-                    raise TimeoutError(
-                        f"Spectrometer read timed out after "
-                        f"{self.read_timeout_s:.1f}s "
-                        f"({len(buf)}/{n} bytes)")
+            s = getattr(self, attr)
+            if s is None:
                 continue
-            if not chunk:
-                raise ConnectionError(
-                    "Spectrometer closed the connection mid-read")
-            buf.extend(chunk)
-        return bytes(buf)
-
-    def _read_line(self, timeout: Optional[float] = None) -> str:
-        """Read a single \\n-terminated ASCII line from the read socket."""
-        if timeout is not None:
-            self._read_sock.settimeout(timeout)
-        line = bytearray()
-        try:
-            while True:
-                ch = self._read_sock.recv(1)
-                if not ch:
-                    break
-                if ch == b'\n':
-                    break
-                line.extend(ch)
-        except socket.timeout:
-            pass
-        finally:
-            self._read_sock.settimeout(self.read_timeout_s)
-        return line.decode('ascii', errors='replace').strip()
-
-    def _read_binary(self) -> np.ndarray:
-        """Read binary float32 data from device."""
-        expected_bytes = self.num_channels * 4
-        raw = self._read_exact(expected_bytes)
-        return np.frombuffer(raw, dtype=np.float32)
-
-    def _read_ascii(self) -> np.ndarray:
-        """Read ASCII CSV line from device."""
-        line = self._read_line()
-        values = [float(v) for v in line.split(',') if v.strip()]
-        return np.array(values)
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                s.close()
+            except OSError:
+                pass
+            setattr(self, attr, None)
+        log.info("[HW] Si-NIR sockets closed")
 
     @property
     def is_connected(self) -> bool:
         return self._read_sock is not None and self._write_sock is not None
+
+    # ────────────────── wire helpers ──────────────────
+
+    @staticmethod
+    def _hex(b: bytes, head: int = 32, tail: int = 8) -> str:
+        if len(b) <= head + tail + 4:
+            return b.hex()
+        return f"{b[:head].hex()}…{b[-tail:].hex()} ({len(b)}B)"
+
+    def _build_packet(self, operation: int,
+                      resolution: int = 0, mode: int = 0,
+                      zero_padding: int = 0, scan_time: int = 0,
+                      common_wav_num: int = 0, optical_gain: int = 0,
+                      apodization_sel: int = 0,
+                      general_data: Optional[List[int]] = None) -> bytes:
+        gd = list(general_data or [])
+        gd = (gd + [0] * self.GENERAL_DATA_LEN)[:self.GENERAL_DATA_LEN]
+        fields = [operation, resolution, mode, zero_padding, scan_time,
+                  common_wav_num, optical_gain, apodization_sel] + gd
+        data = struct.pack(f"<{self.PACKET_NUM_INTS}i", *fields)
+        pkt = struct.pack("<I", len(data)) + data
+        if self.verbose:
+            log.info(
+                f"[HW] TX op={operation} "
+                f"(res={resolution} mode={mode} zp={zero_padding} "
+                f"scan={scan_time}ms cwn={common_wav_num} "
+                f"gain={optical_gain} apod={apodization_sel}) "
+                f"datalen={len(data)} pkt={len(pkt)}B")
+            log.info(f"[HW] TX bytes: {self._hex(pkt)}")
+        return pkt
+
+    def _send(self, pkt: bytes):
+        if self._write_sock is None:
+            raise ConnectionError("Si-NIR write socket not connected")
+        self._write_sock.sendall(pkt)
+
+    def _read_exact(self, n: int, label: str = "data") -> bytes:
+        if self._read_sock is None:
+            raise ConnectionError("Si-NIR read socket not connected")
+        buf = bytearray()
+        deadline = time.time() + self.read_timeout_s
+        while len(buf) < n:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Si-NIR {label} read timed out after "
+                    f"{self.read_timeout_s:.1f}s: got {len(buf)}/{n}B. "
+                    f"Partial: {self._hex(bytes(buf))}")
+            try:
+                self._read_sock.settimeout(min(remaining, 2.0))
+                chunk = self._read_sock.recv(min(65536, n - len(buf)))
+            except socket.timeout:
+                continue
+            if not chunk:
+                raise ConnectionError(
+                    f"Si-NIR closed connection during {label}; "
+                    f"got {len(buf)}/{n}B. "
+                    f"Partial: {self._hex(bytes(buf))}")
+            buf.extend(chunk)
+        if self.verbose:
+            log.info(f"[HW] RX {label} {n}B: {self._hex(bytes(buf))}")
+        return bytes(buf)
+
+    def _drain_read_buffer(self, max_bytes: int = 4096, timeout: float = 0.2):
+        if self._read_sock is None:
+            return
+        old = self._read_sock.gettimeout()
+        self._read_sock.settimeout(timeout)
+        drained = bytearray()
+        try:
+            while len(drained) < max_bytes:
+                chunk = self._read_sock.recv(
+                    min(4096, max_bytes - len(drained)))
+                if not chunk:
+                    break
+                drained.extend(chunk)
+        except (socket.timeout, BlockingIOError, OSError):
+            pass
+        finally:
+            try:
+                self._read_sock.settimeout(
+                    old if old is not None else self.read_timeout_s)
+            except OSError:
+                pass
+        if drained:
+            log.warning(f"[HW] Drained {len(drained)} stale bytes: "
+                        f"{self._hex(bytes(drained))}")
+
+    # ────────────────── operations ──────────────────
+
+    def check_board(self) -> int:
+        """Op 2: returns 1 if sensor is ready, 0 otherwise (spec §2.2.3)."""
+        with self._lock:
+            self._send(self._build_packet(self.OP_CHECK_BOARD))
+            resp = self._read_exact(1, label="checkBoard")
+        return resp[0]
+
+    def read_module_id(self) -> str:
+        """Op 1: 21-byte null-terminated module ID string (spec §2.2.2)."""
+        with self._lock:
+            self._send(self._build_packet(self.OP_READ_MODULE_ID))
+            resp = self._read_exact(21, label="readModuleID")
+        end = resp.find(b'\x00')
+        text = resp[:end] if end >= 0 else resp
+        return text.decode('ascii', errors='replace').strip()
+
+    def read_spectrum(self) -> np.ndarray:
+        """Op 3 (runPSD): one scan, dequantized PSD as float64 (spec §2.2.4)."""
+        if not self.is_connected:
+            raise ConnectionError("Si-NIR not connected; call connect() first")
+
+        pkt = self._build_packet(
+            operation=self.OP_RUN_PSD,
+            resolution=0,
+            mode=0,
+            zero_padding=self.zero_padding,
+            scan_time=self._scan_time_ms,
+            common_wav_num=self._common_wav_num,
+            optical_gain=self.optical_gain,
+            apodization_sel=self.apodization,
+        )
+
+        with self._lock:
+            t0 = time.time()
+            self._send(pkt)
+            log.info(f"[HW] runPSD sent; awaiting response "
+                     f"(scanTime={self._scan_time_ms}ms, "
+                     f"timeout={self.read_timeout_s:.1f}s)")
+
+            header = self._read_exact(8, label="runPSD-header")
+            status, length = struct.unpack("<II", header)
+            log.info(f"[HW] runPSD header → status=0x{status:08x} "
+                     f"length={length}")
+
+            if status != 0:
+                try:
+                    self._drain_read_buffer(
+                        max_bytes=self.PSD_BUFFER_BYTES * 2 + 1024,
+                        timeout=1.0)
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    f"Si-NIR runPSD returned error status {status} "
+                    f"(0x{status:08x}); see spec §2.2.4")
+
+            psd_bytes = self._read_exact(self.PSD_BUFFER_BYTES,
+                                         label="runPSD-PSD")
+            wn_bytes = self._read_exact(self.PSD_BUFFER_BYTES,
+                                        label="runPSD-WN")
+            elapsed = time.time() - t0
+
+        if length <= 0 or length > self.PSD_BUFFER_SAMPLES:
+            raise RuntimeError(
+                f"Si-NIR returned implausible length={length} "
+                f"(must be 1..{self.PSD_BUFFER_SAMPLES}); "
+                f"raw header={header.hex()}")
+
+        psd_q = np.frombuffer(psd_bytes, dtype='<i8')[:length]
+        wn_q = np.frombuffer(wn_bytes, dtype='<i8')[:length]
+        psd = psd_q.astype(np.float64) / self.PSD_DEQUANT
+        wn = wn_q.astype(np.float64) / self.WN_DEQUANT
+        self.last_wavenumber = wn
+
+        log.info(f"[HW] runPSD parsed in {elapsed*1000:.0f}ms: "
+                 f"{length} samples, "
+                 f"PSD∈[{psd.min():.4e}, {psd.max():.4e}], "
+                 f"WN∈[{wn.min():.1f}, {wn.max():.1f}] cm⁻¹")
+
+        if self.verbose and length >= 3:
+            # Spec claims int64/2**33 for PSD and int64/2**30 for WN.
+            # User warned of minor doc issues — log the float64
+            # reinterpretation too so the right type is obvious from one
+            # terminal run (the version that gives sane numbers wins).
+            mid = length // 2
+            psd_dbl = np.frombuffer(psd_bytes, dtype='<f8')[:length]
+            wn_dbl = np.frombuffer(wn_bytes, dtype='<f8')[:length]
+            log.info(
+                f"[HW] PSD[0,{mid},-1] as int64/2**33: "
+                f"{psd[0]:.4e} {psd[mid]:.4e} {psd[-1]:.4e}")
+            log.info(
+                f"[HW] PSD[0,{mid},-1] as float64    : "
+                f"{psd_dbl[0]:.4e} {psd_dbl[mid]:.4e} {psd_dbl[-1]:.4e}")
+            log.info(
+                f"[HW] WN [0,{mid},-1] as int64/2**30: "
+                f"{wn[0]:.1f} {wn[mid]:.1f} {wn[-1]:.1f}")
+            log.info(
+                f"[HW] WN [0,{mid},-1] as float64    : "
+                f"{wn_dbl[0]:.1f} {wn_dbl[mid]:.1f} {wn_dbl[-1]:.1f}")
+
+        return psd
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -633,11 +821,22 @@ class SpectrometerPipeline:
 def main():
     parser = argparse.ArgumentParser(description='ANUBIX Spectrometer Driver')
     parser.add_argument('--host', default='192.168.137.2',
-                        help='Spectrometer IP (USB-Ethernet gadget)')
-    parser.add_argument('--read-port', type=int, default=5000,
-                        help='TCP port for inbound data (spectrum/acks)')
-    parser.add_argument('--write-port', type=int, default=5001,
-                        help='TCP port for outbound commands (INT:/READ)')
+                        help='Si-NIR IP (USB-Ethernet gadget)')
+    parser.add_argument('--read-port', type=int, default=5001,
+                        help='TCP port for inbound data (spec: 5001)')
+    parser.add_argument('--write-port', type=int, default=5000,
+                        help='TCP port for outbound commands (spec: 5000)')
+    parser.add_argument('--integration', type=int, default=100,
+                        help='scanTime in ms (10..224)')
+    parser.add_argument('--zero-padding', type=int, default=2,
+                        choices=[1, 2, 3],
+                        help='FFT points (1=8k, 2=16k, 3=32k)')
+    parser.add_argument('--optical-gain', type=int, default=0,
+                        choices=[0, 1, 2],
+                        help='0=saved on sensor, 1=calculated, 2=external')
+    parser.add_argument('--apodization', type=int, default=2,
+                        choices=[0, 1, 2, 3],
+                        help='0=Boxcar 1=Gaussian 2=Happ-Genzel 3=Lorenz')
     parser.add_argument('--task', required=True,
                         choices=['water_stress', 'disease', 'harvest_status'],
                         help='Analysis task type')
@@ -647,6 +846,8 @@ def main():
                         help='Number of readings to take')
     parser.add_argument('--interval', type=float, default=2.0,
                         help='Interval between repeated readings (seconds)')
+    parser.add_argument('--quiet', action='store_true',
+                        help='Suppress hex-dump debug logs')
     args = parser.parse_args()
 
     # Find bg.csv
@@ -665,6 +866,11 @@ def main():
         read_port=args.read_port,
         write_port=args.write_port,
         num_channels=257,
+        integration_time_ms=args.integration,
+        zero_padding=args.zero_padding,
+        optical_gain=args.optical_gain,
+        apodization=args.apodization,
+        verbose_debug=not args.quiet,
     )
 
     pipeline = SpectrometerPipeline(

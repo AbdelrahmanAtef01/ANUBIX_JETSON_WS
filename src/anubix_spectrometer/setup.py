@@ -15,7 +15,7 @@ setup(
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
         (os.path.join('share', package_name, 'config'), glob('config/*.csv')),
     ],
-    install_requires=['setuptools', 'numpy', 'pyserial'],
+    install_requires=['setuptools', 'numpy'],
     zip_safe=True,
     maintainer='ANUBIX Team',
     maintainer_email='anubix@example.com',

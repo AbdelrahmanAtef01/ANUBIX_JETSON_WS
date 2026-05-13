@@ -1,14 +1,25 @@
 anubix_spectrometer:
   ros__parameters:
-    # The spectrometer is a USB-Ethernet device, NOT a serial port.
-    # The Jetson must have a usb0/eth-over-USB interface configured for
-    # this subnet (default sensor IP: 192.168.137.2). The sensor exposes
-    # two TCP ports: read_port for inbound data, write_port for commands.
+    # Si-NIR Communication Service rev 1 (USB-Ethernet gadget).
+    # The Jetson must have a usb0 / enx... interface on the 192.168.137.x
+    # subnet. The sensor exposes TWO TCP ports per spec §1:
+    #   write_port = 5000  (host → sensor, command packets)
+    #   read_port  = 5001  (sensor → host, response packets)
+    # Both must be reachable; verify with:
+    #   timeout 2 bash -c '</dev/tcp/192.168.137.2/5000'
+    #   timeout 2 bash -c '</dev/tcp/192.168.137.2/5001'
     host: "192.168.137.2"
-    read_port: 5000
-    write_port: 5001
-    num_channels: 257
-    integration_time_ms: 100
+    read_port: 5001
+    write_port: 5000
+    num_channels: 257             # picks commonWavNum=3 (spec §2.1)
+
+    # runPSD scan settings (spec §2.2.4)
+    integration_time_ms: 100      # scanTime, clamped to [10, 224]
+    zero_padding: 2               # 1=8k, 2=16k, 3=32k FFT points
+    optical_gain: 0               # 0=use sensor-saved gain, 1=calc, 2=ext
+    apodization: 2                # 0=Boxcar 1=Gaussian 2=Happ-Genzel 3=Lorenz
+
+    verbose_debug: true           # hex-dump every TX/RX packet (turn off in prod)
     connect_timeout_s: 5.0
-    read_timeout_s: 5.0
-    bg_file: ""  # Leave empty to use the installed bg.csv from package share
+    read_timeout_s: 15.0          # raised: runPSD response is ~64 KB
+    bg_file: ""                   # empty = use installed bg.csv from package share
