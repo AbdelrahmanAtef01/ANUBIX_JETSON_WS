@@ -132,14 +132,17 @@ class SpectrometerDevice:
         write_port = 5000  — host → sensor (binary command packets)
         read_port  = 5001  — sensor → host (binary response packets)
 
-    Command packet:
-        [u32 length=192][48 × i32 LE fields]
+    Command packet (EMPIRICAL — doc says a 4-byte length prefix is sent;
+    actual sensor wants the 48 raw i32 fields with NO length prefix):
+        [48 × i32 LE fields]                           (192 bytes total)
         fields = operation, resolution, mode, zeroPadding, scanTime,
                  commonWavNum, opticalGain, apodizationSel, GeneralData[40]
 
-    runPSD (op 3) response:
+    runPSD (op 3) response (EMPIRICAL — doc claims status:1 for checkBoard
+    but probe shows checkBoard reply is 5 bytes = u32 status + 1-byte pad,
+    so all statuses look like u32):
         [u32 status][u32 length]
-        [i64 PSD × 4096][i64 Wavenumber × 4096]
+        [i64 PSD × length][i64 Wavenumber × length]
         PSD /= 2**33,  Wavenumber /= 2**30
     """
 
@@ -304,19 +307,22 @@ class SpectrometerDevice:
                       common_wav_num: int = 0, optical_gain: int = 0,
                       apodization_sel: int = 0,
                       general_data: Optional[List[int]] = None) -> bytes:
+        # NOTE: spec §2.2.1 says a 4-byte length prefix precedes every
+        # command. EMPIRICALLY (sinir_probe.py) the sensor only replies
+        # when the prefix is omitted — variant C is the only one that
+        # gets bytes back. So we send the 48 i32 fields raw.
         gd = list(general_data or [])
         gd = (gd + [0] * self.GENERAL_DATA_LEN)[:self.GENERAL_DATA_LEN]
         fields = [operation, resolution, mode, zero_padding, scan_time,
                   common_wav_num, optical_gain, apodization_sel] + gd
-        data = struct.pack(f"<{self.PACKET_NUM_INTS}i", *fields)
-        pkt = struct.pack("<I", len(data)) + data
+        pkt = struct.pack(f"<{self.PACKET_NUM_INTS}i", *fields)
         if self.verbose:
             log.info(
                 f"[HW] TX op={operation} "
                 f"(res={resolution} mode={mode} zp={zero_padding} "
                 f"scan={scan_time}ms cwn={common_wav_num} "
                 f"gain={optical_gain} apod={apodization_sel}) "
-                f"datalen={len(data)} pkt={len(pkt)}B")
+                f"pkt={len(pkt)}B (no length prefix — empirical)")
             log.info(f"[HW] TX bytes: {self._hex(pkt)}")
         return pkt
 
@@ -377,26 +383,50 @@ class SpectrometerDevice:
             log.warning(f"[HW] Drained {len(drained)} stale bytes: "
                         f"{self._hex(bytes(drained))}")
 
+    # ────────────────── response framing ──────────────────
+    # Empirical (sinir_probe.py variant C):
+    #   checkBoard TX = 192B raw fields (no length prefix)
+    #   checkBoard RX = 01000000 00 = [u32 resp_len=1][payload 1 byte]
+    # So all responses are: [u32 LE payload_length][payload_length bytes]
+
+    def _recv_response(self, label: str) -> bytes:
+        """Read a framed response: [u32 LE payload_len][payload bytes]."""
+        hdr = self._read_exact(4, label=f"{label}-resp-len")
+        payload_len = struct.unpack("<I", hdr)[0]
+        if self.verbose:
+            log.info(f"[HW] RX {label} response_len={payload_len}")
+        if payload_len == 0:
+            return b''
+        if payload_len > 200_000:
+            log.warning(
+                f"[HW] {label} response_len={payload_len} is unusually "
+                f"large; raw header={hdr.hex()}")
+        payload = self._read_exact(payload_len, label=f"{label}-payload")
+        return payload
+
     # ────────────────── operations ──────────────────
 
     def check_board(self) -> int:
-        """Op 2: returns 1 if sensor is ready, 0 otherwise (spec §2.2.3)."""
+        """Op 2: 0=OK/connected (per spec description), non-zero=error."""
         with self._lock:
             self._send(self._build_packet(self.OP_CHECK_BOARD))
-            resp = self._read_exact(1, label="checkBoard")
-        return resp[0]
+            payload = self._recv_response("checkBoard")
+        status = payload[0] if payload else 0xFF
+        log.info(f"[HW] checkBoard payload={payload.hex()} "
+                 f"status_byte=0x{status:02x}")
+        return status
 
     def read_module_id(self) -> str:
-        """Op 1: 21-byte null-terminated module ID string (spec §2.2.2)."""
+        """Op 1: null-terminated module ID string (up to 21 bytes)."""
         with self._lock:
             self._send(self._build_packet(self.OP_READ_MODULE_ID))
-            resp = self._read_exact(21, label="readModuleID")
-        end = resp.find(b'\x00')
-        text = resp[:end] if end >= 0 else resp
+            payload = self._recv_response("readModuleID")
+        end = payload.find(b'\x00')
+        text = payload[:end] if end >= 0 else payload
         return text.decode('ascii', errors='replace').strip()
 
     def read_spectrum(self) -> np.ndarray:
-        """Op 3 (runPSD): one scan, dequantized PSD as float64 (spec §2.2.4)."""
+        """Op 3 (runPSD): one scan, dequantized PSD as float64."""
         if not self.is_connected:
             raise ConnectionError("Si-NIR not connected; call connect() first")
 
@@ -418,18 +448,26 @@ class SpectrometerDevice:
                      f"(scanTime={self._scan_time_ms}ms, "
                      f"timeout={self.read_timeout_s:.1f}s)")
 
-            header = self._read_exact(8, label="runPSD-header")
-            status, length = struct.unpack("<II", header)
-            log.info(f"[HW] runPSD header → status=0x{status:08x} "
-                     f"length={length}")
+            # Response framing: [u32 resp_len][payload]
+            # Payload for runPSD: [u32 status][u32 data_length][PSD][WN]
+            resp_hdr = self._read_exact(4, label="runPSD-resp-len")
+            resp_len = struct.unpack("<I", resp_hdr)[0]
+            log.info(f"[HW] runPSD response_len={resp_len} bytes")
+
+            # Read status + data_length from inside the payload
+            inner_hdr = self._read_exact(8, label="runPSD-status+length")
+            status, length = struct.unpack("<II", inner_hdr)
+            log.info(f"[HW] runPSD → status=0x{status:08x} "
+                     f"data_length={length}")
 
             if status != 0:
-                try:
-                    self._drain_read_buffer(
-                        max_bytes=self.PSD_BUFFER_BYTES * 2 + 1024,
-                        timeout=1.0)
-                except Exception:
-                    pass
+                remaining = max(0, resp_len - 8)
+                if remaining > 0:
+                    try:
+                        self._drain_read_buffer(
+                            max_bytes=remaining, timeout=2.0)
+                    except Exception:
+                        pass
                 raise RuntimeError(
                     f"Si-NIR runPSD returned error status {status} "
                     f"(0x{status:08x}); see spec §2.2.4")
@@ -441,10 +479,10 @@ class SpectrometerDevice:
             elapsed = time.time() - t0
 
         if length <= 0 or length > self.PSD_BUFFER_SAMPLES:
-            raise RuntimeError(
-                f"Si-NIR returned implausible length={length} "
-                f"(must be 1..{self.PSD_BUFFER_SAMPLES}); "
-                f"raw header={header.hex()}")
+            log.warning(
+                f"[HW] data_length={length} outside valid range; "
+                f"falling back to num_channels={self.num_channels}")
+            length = self.num_channels
 
         psd_q = np.frombuffer(psd_bytes, dtype='<i8')[:length]
         wn_q = np.frombuffer(wn_bytes, dtype='<i8')[:length]
@@ -454,14 +492,10 @@ class SpectrometerDevice:
 
         log.info(f"[HW] runPSD parsed in {elapsed*1000:.0f}ms: "
                  f"{length} samples, "
-                 f"PSD∈[{psd.min():.4e}, {psd.max():.4e}], "
-                 f"WN∈[{wn.min():.1f}, {wn.max():.1f}] cm⁻¹")
+                 f"PSD range=[{psd.min():.4e}, {psd.max():.4e}], "
+                 f"WN range=[{wn.min():.1f}, {wn.max():.1f}] cm-1")
 
         if self.verbose and length >= 3:
-            # Spec claims int64/2**33 for PSD and int64/2**30 for WN.
-            # User warned of minor doc issues — log the float64
-            # reinterpretation too so the right type is obvious from one
-            # terminal run (the version that gives sane numbers wins).
             mid = length // 2
             psd_dbl = np.frombuffer(psd_bytes, dtype='<f8')[:length]
             wn_dbl = np.frombuffer(wn_bytes, dtype='<f8')[:length]
