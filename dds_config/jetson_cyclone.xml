@@ -1,42 +1,65 @@
 <!--
   CycloneDDS configuration for the Jetson Orin Nano.
 
-  This file configures unicast-only peer discovery over the direct
-  Jetson ↔ Raspberry Pi ethernet link.
+  Purpose: configure participant discovery over both
+    (a) the Jetson↔RPi direct ethernet link (192.168.10.0/24), and
+    (b) localhost — so that `ros2 topic list` in one terminal can see
+        topics from `ros2 launch` running in another terminal on the
+        SAME Jetson.
 
-  IMPORTANT — interface name:
-    The USB-C ethernet adapter appears under a different interface name
-    depending on the kernel. Find it with:
-        ip link show
-    Common names: eth0, usb0, enx<mac>, enp3s0u1u4 ...
-    Update the NetworkInterface 'name' attribute below to match.
+  Bug fixed by this revision (was breaking item (b)):
+    - The previous config pinned the interface by name="eth0", but the
+      USB-Ethernet adapter on this Jetson enumerates as e.g.
+      "enxc9a0c19b053" — so cyclone couldn't bind it, fell back to
+      defaults, and local discovery became flaky.
+    - AllowMulticast was "false", so participants on the same machine
+      had no way to find each other.
+    - The Peers list only contained the RPi, so unicast discovery
+      between local terminals failed silently — symptom was a
+      `ros2 topic list` that randomly omitted topics from nodes that
+      were actually running fine in another terminal.
 
   Network topology:
-    Jetson  IP: 192.168.10.1 / 24   (this machine)
-    RPi     IP: 192.168.10.2 / 24   (peer)
-
-  Apply with:
-    export CYCLONEDDS_URI=file://$HOME/anubix_ws/dds_config/jetson_cyclone.xml
-    export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-    export ROS_DOMAIN_ID=42
+    Jetson IP  192.168.10.1 / 24  (this machine — pinned by IP, not name)
+    RPi    IP  192.168.10.2 / 24  (peer)
 -->
 <CycloneDDS>
   <Domain id="any">
 
     <General>
-      <!-- Replace "eth0" with your actual USB-C ethernet interface name -->
+      <!--
+        Pin the DDS interface by IP address, NOT by kernel name. The
+        USB-Ethernet adapter enumerates under a different name on every
+        kernel boot (eth0 / usb0 / enx<mac> / enp3s0u1u4 / ...), so
+        name= is fragile. Address= picks the correct interface based
+        on which one carries 192.168.10.1 regardless of its kernel name.
+      -->
       <Interfaces>
-        <NetworkInterface name="eth0" priority="default" multicast="false"/>
+        <NetworkInterface address="192.168.10.1" priority="default" multicast="default"/>
       </Interfaces>
-      <!-- Disable multicast — direct link may not support it -->
-      <AllowMulticast>false</AllowMulticast>
+      <!--
+        SPDP = multicast for the small Simple Participant Discovery
+        Protocol packets only; bulk data still flows unicast. This is
+        the minimum needed for local-process discovery, while keeping
+        the direct ethernet link free of heavy multicast traffic.
+      -->
+      <AllowMulticast>spdp</AllowMulticast>
     </General>
 
     <Discovery>
       <ParticipantIndex>auto</ParticipantIndex>
       <MaxAutoParticipantIndex>32</MaxAutoParticipantIndex>
-      <!-- Unicast peer: Raspberry Pi -->
       <Peers>
+        <!--
+          localhost: guarantees a `ros2` CLI in a fresh terminal can
+          discover nodes that were launched in another terminal on
+          this Jetson, even with multicast off. Without this entry,
+          topics from local launches randomly disappear from
+          `ros2 topic list` — the root cause that was masquerading
+          as missing-spectrometer/arm/etc. topics.
+        -->
+        <Peer address="localhost"/>
+        <!-- Raspberry Pi over the direct ethernet link -->
         <Peer address="192.168.10.2"/>
       </Peers>
     </Discovery>
