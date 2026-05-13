@@ -17,10 +17,17 @@
     list` and `ros2 topic list` return empty even though every node
     is running fine inside the launch.
 
-    Now: we declare the direct-link IP as a "best-effort" interface
-    (presence_required=false → Cyclone does NOT fail if it is missing),
-    AND we let Cyclone autodetect the system default so there is
-    always at least one usable interface for local discovery.
+    We then tried `autodetermine="true"` as a second entry. That
+    failed in the OPPOSITE way: when 192.168.10.1 IS up, autodetermine
+    picks the same physical NIC (the direct link is also the default
+    route) and Cyclone aborts every node with "the same interface
+    may not be selected twice" → rmw_create_node fails.
+
+    Now: direct-link IP as a "best-effort" interface
+    (presence_required=false), and explicit loopback (name="lo") as
+    the fallback. lo is always present, never collides with eth0,
+    and combined with the localhost <Peer/> below it keeps
+    cross-process discovery alive even before the direct link is up.
 
   Network topology:
     Jetson IP  192.168.10.1 / 24  (this machine; optional at boot)
@@ -40,11 +47,13 @@
         -->
         <NetworkInterface address="192.168.10.1" presence_required="false" priority="10"/>
         <!--
-          Fallback: pick the system default interface (usually built-in
-          ethernet or Wi-Fi). Guarantees local discovery always has a
-          working transport even before the direct link is up.
+          Fallback: explicit loopback. Always present, distinct from
+          eth0 (so no "same interface twice" error when the direct
+          link is up), and combined with the localhost <Peer/> entry
+          below it keeps cross-process discovery on this Jetson alive
+          even when the RPi cable is unplugged.
         -->
-        <NetworkInterface autodetermine="true" priority="0"/>
+        <NetworkInterface name="lo" priority="0"/>
       </Interfaces>
       <!--
         SPDP = multicast for the small Simple Participant Discovery
