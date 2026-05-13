@@ -85,10 +85,11 @@ class VisionNode(Node):
         # How many detection attempts per second while polling.
         self.declare_parameter('detection_rate_hz', 2.0)
         self.declare_parameter('arm_move_timeout_s', 30.0)
-        # Pixel position of the gripper in each camera's frame. -1 = use
-        # the centre of the live frame at runtime.
-        self.declare_parameter('gripper_px_x_cam1', -1)
-        self.declare_parameter('gripper_px_y_cam1', -1)
+        # Pixel position of the gripper in the USB (flange) camera's frame.
+        # -1 = use the frame centre at runtime. Camera 1 (RealSense) does
+        # not see the gripper — it uses the bottom-centre grab plane
+        # heuristic baked into get_target_leaf — so it has no gripper
+        # parameter.
         self.declare_parameter('gripper_px_x_cam2', -1)
         self.declare_parameter('gripper_px_y_cam2', -1)
         # Maximum pixel distance allowed when re-identifying the leaf in
@@ -105,10 +106,6 @@ class VisionNode(Node):
         self._detection_timeout = float(self.get_parameter('detection_timeout_s').value)
         self._detection_rate = float(self.get_parameter('detection_rate_hz').value)
         self._arm_timeout = float(self.get_parameter('arm_move_timeout_s').value)
-        self._gripper_px_cam1 = (
-            int(self.get_parameter('gripper_px_x_cam1').value),
-            int(self.get_parameter('gripper_px_y_cam1').value),
-        )
         self._gripper_px_cam2 = (
             int(self.get_parameter('gripper_px_x_cam2').value),
             int(self.get_parameter('gripper_px_y_cam2').value),
@@ -185,10 +182,7 @@ class VisionNode(Node):
             f'{self._detection_rate:.1f} Hz')
         self.get_logger().info(f'  Visualize: {self._visualize}')
         self.get_logger().info(
-            f'  Gripper pixel (cam1): {self._gripper_px_cam1} '
-            f'(<0 = frame centre)')
-        self.get_logger().info(
-            f'  Gripper pixel (cam2): {self._gripper_px_cam2} '
+            f'  Gripper pixel (cam2 flange): {self._gripper_px_cam2} '
             f'(<0 = frame centre)')
         self.get_logger().info('=' * 60)
         self.get_logger().info('[VISION] Ready and waiting for goals.')
@@ -398,7 +392,6 @@ class VisionNode(Node):
 
                 color_image = np.asanyarray(color_frame.get_data())
                 h, w = color_image.shape[:2]
-                gx, gy = self._resolve_gripper(self._gripper_px_cam1, w, h)
 
                 results = self._model.predict(
                     color_image, conf=self._confidence, verbose=False)
@@ -407,7 +400,15 @@ class VisionNode(Node):
                 if self._visualize:
                     debug = color_image.copy()
                     draw_leaves(debug, all_leaves, target_leaf)
-                    draw_grabber_ui(debug, gx, gy)
+                    # Camera 1 does not see the gripper. The scoring uses
+                    # the bottom-centre "grab plane" as its reference, so
+                    # draw that instead of a gripper crosshair.
+                    cv2.line(debug, (0, h - 20), (w, h - 20),
+                             (200, 200, 0), 1)
+                    cv2.circle(debug, (w // 2, h - 20), 6, (0, 200, 200), 2)
+                    cv2.putText(debug, 'grab plane', (w // 2 + 10, h - 25),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                                (0, 200, 200), 1)
                     remaining = max(0.0, deadline - time.time())
                     draw_hud(debug, [
                         f'CAM 1 (RealSense) task={task_type}',
@@ -457,7 +458,6 @@ class VisionNode(Node):
                 if self._visualize:
                     final = color_image.copy()
                     draw_leaves(final, all_leaves, target_leaf)
-                    draw_grabber_ui(final, gx, gy)
                     draw_hud(final, [
                         f'CAM 1 FOUND task={task_type}',
                         f'pixel=({cx},{cy}) depth={dist:.2f}m',

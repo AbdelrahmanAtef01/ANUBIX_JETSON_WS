@@ -23,11 +23,10 @@ anubix_vision:
     # Seconds to wait for /arm/arm_status: success during USB calibration.
     arm_move_timeout_s: 30.0
 
-    # Pixel position of the gripper in each camera's image.
-    # Use -1 to default to the centre of the live frame. Override with the
-    # measured gripper centre (in pixels) after calibration.
-    gripper_px_x_cam1: -1
-    gripper_px_y_cam1: -1
+    # Pixel position of the gripper in the USB (flange) camera image.
+    # Use -1 to default to the centre of the live frame. Override with
+    # the measured gripper centre after calibration. Camera 1 (RealSense,
+    # base) does not see the gripper and has no equivalent parameter.
     gripper_px_x_cam2: -1
     gripper_px_y_cam2: -1
 
