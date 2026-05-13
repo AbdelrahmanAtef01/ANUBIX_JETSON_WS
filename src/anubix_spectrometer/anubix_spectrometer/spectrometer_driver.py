@@ -11,12 +11,15 @@ Supported task types:
   - harvest_status:  Chlorophyll/carotenoid ratio for ripeness
 
 Hardware: TCP/IP spectrometer over USB-Ethernet gadget
-          (257 channels, ~3921-7407 wavelength range, default 192.168.137.2:5555)
+          (257 channels, ~3921-7407 wavelength range, default host 192.168.137.2)
+          The sensor exposes two TCP ports:
+            - 5000  read  (spectrum data + ASCII acks flow from device → host)
+            - 5001  write (commands like INT:/READ flow from host → device)
 Background calibration: bg.csv (dark/reference spectrum)
 
 Usage standalone (testing without ROS):
     python3 spectrometer.py --host 192.168.137.2 --task water_stress
-    python3 spectrometer.py --simulate --task disease
+    python3 spectrometer.py --host 192.168.137.2 --read-port 5000 --write-port 5001 --task water_stress
 """
 
 import os
@@ -118,37 +121,41 @@ class SpectrometerDevice:
     Interface to the physical spectrometer over TCP/IP.
 
     The sensor exposes a USB Ethernet gadget at a fixed static address
-    (default 192.168.137.2:5555). We open a TCP socket, send an ASCII
-    command, and read back either a binary float32 block or an ASCII
-    CSV line — same wire protocol as the previous serial driver.
+    (default host 192.168.137.2) with two distinct TCP endpoints:
+      - read_port  (default 5000): inbound data — spectrum bytes + ASCII acks
+      - write_port (default 5001): outbound commands — INT:/READ
 
-    Use SimulatedSpectrometer for tests without hardware.
+    We open one socket per direction. Commands are written on the write
+    socket; spectrum data and any responses are read from the read socket.
     """
 
-    def __init__(self, host: str = '192.168.137.2', tcp_port: int = 5555,
+    def __init__(self, host: str = '192.168.137.2',
+                 read_port: int = 5000, write_port: int = 5001,
                  num_channels: int = 257, protocol: str = 'binary',
                  integration_time_ms: int = 100, connect_timeout_s: float = 5.0,
                  read_timeout_s: float = 5.0):
         self.host = host
-        self.tcp_port = tcp_port
+        self.read_port = read_port
+        self.write_port = write_port
         self.num_channels = num_channels
         self.protocol = protocol
         self.integration_time_ms = integration_time_ms
         self.connect_timeout_s = connect_timeout_s
         self.read_timeout_s = read_timeout_s
-        self._sock: Optional[socket.socket] = None
+        self._read_sock: Optional[socket.socket] = None
+        self._write_sock: Optional[socket.socket] = None
         self._lock = threading.Lock()
 
-    def connect(self):
-        """Open TCP connection to the spectrometer."""
+    def _open_sock(self, port: int, label: str) -> socket.socket:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(self.connect_timeout_s)
         try:
-            sock.connect((self.host, self.tcp_port))
+            sock.connect((self.host, port))
         except OSError as e:
             sock.close()
             raise ConnectionError(
-                f"Could not reach spectrometer at {self.host}:{self.tcp_port}: {e}"
+                f"Could not reach spectrometer {label} socket "
+                f"at {self.host}:{port}: {e}"
             ) from e
         sock.settimeout(self.read_timeout_s)
         # Disable Nagle so single-byte commands flush immediately.
@@ -156,56 +163,72 @@ class SpectrometerDevice:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except OSError:
             pass
-        self._sock = sock
-        log.info(f"[HW] Connected to spectrometer at "
-                 f"{self.host}:{self.tcp_port}")
+        return sock
+
+    def connect(self):
+        """Open both TCP connections to the spectrometer."""
+        self._read_sock = self._open_sock(self.read_port, "read")
+        try:
+            self._write_sock = self._open_sock(self.write_port, "write")
+        except ConnectionError:
+            # If write-port fails, close the read socket so we don't leak it.
+            try:
+                self._read_sock.close()
+            finally:
+                self._read_sock = None
+            raise
+        log.info(f"[HW] Connected to spectrometer at {self.host} "
+                 f"(read={self.read_port}, write={self.write_port})")
         self._drain()
         self._send_integration_time()
 
     def disconnect(self):
-        """Close TCP connection."""
-        if self._sock is not None:
-            try:
-                self._sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            self._sock.close()
-            self._sock = None
-            log.info("[HW] Disconnected from spectrometer")
+        """Close both TCP connections."""
+        for attr in ('_read_sock', '_write_sock'):
+            sock = getattr(self, attr)
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                sock.close()
+                setattr(self, attr, None)
+        log.info("[HW] Disconnected from spectrometer")
 
     def _drain(self):
-        """Discard anything buffered in the socket before a fresh exchange."""
-        if self._sock is None:
+        """Discard anything buffered on the read socket before a fresh exchange."""
+        if self._read_sock is None:
             return
-        self._sock.settimeout(0.05)
+        self._read_sock.settimeout(0.05)
         try:
             while True:
-                chunk = self._sock.recv(4096)
+                chunk = self._read_sock.recv(4096)
                 if not chunk:
                     break
         except (socket.timeout, BlockingIOError, OSError):
             pass
         finally:
-            self._sock.settimeout(self.read_timeout_s)
+            self._read_sock.settimeout(self.read_timeout_s)
 
     def _send_integration_time(self):
         """Configure integration time on the sensor."""
-        if self._sock is None:
+        if self._write_sock is None:
             return
         with self._lock:
             cmd = f"INT:{self.integration_time_ms}\n".encode('ascii')
-            self._sock.sendall(cmd)
+            self._write_sock.sendall(cmd)
             time.sleep(0.1)
+            # Ack (if any) is published on the read socket.
             resp = self._read_line(timeout=1.0)
             if resp:
                 log.info(f"[HW] Integration time set: {resp}")
 
     def read_spectrum(self) -> np.ndarray:
         """Trigger a reading and return raw PSD array."""
-        if self._sock is None:
-            raise ConnectionError("Spectrometer socket not connected")
+        if self._read_sock is None or self._write_sock is None:
+            raise ConnectionError("Spectrometer sockets not connected")
         with self._lock:
-            self._sock.sendall(b'READ\n')
+            self._write_sock.sendall(b'READ\n')
 
             if self.protocol == 'binary':
                 data = self._read_binary()
@@ -215,12 +238,12 @@ class SpectrometerDevice:
         return data
 
     def _read_exact(self, n: int) -> bytes:
-        """Block until ``n`` bytes have been received."""
+        """Block until ``n`` bytes have been received on the read socket."""
         buf = bytearray()
         start = time.time()
         while len(buf) < n:
             try:
-                chunk = self._sock.recv(n - len(buf))
+                chunk = self._read_sock.recv(n - len(buf))
             except socket.timeout:
                 if time.time() - start > self.read_timeout_s:
                     raise TimeoutError(
@@ -235,13 +258,13 @@ class SpectrometerDevice:
         return bytes(buf)
 
     def _read_line(self, timeout: Optional[float] = None) -> str:
-        """Read a single \\n-terminated ASCII line from the socket."""
+        """Read a single \\n-terminated ASCII line from the read socket."""
         if timeout is not None:
-            self._sock.settimeout(timeout)
+            self._read_sock.settimeout(timeout)
         line = bytearray()
         try:
             while True:
-                ch = self._sock.recv(1)
+                ch = self._read_sock.recv(1)
                 if not ch:
                     break
                 if ch == b'\n':
@@ -250,7 +273,7 @@ class SpectrometerDevice:
         except socket.timeout:
             pass
         finally:
-            self._sock.settimeout(self.read_timeout_s)
+            self._read_sock.settimeout(self.read_timeout_s)
         return line.decode('ascii', errors='replace').strip()
 
     def _read_binary(self) -> np.ndarray:
@@ -267,47 +290,7 @@ class SpectrometerDevice:
 
     @property
     def is_connected(self) -> bool:
-        return self._sock is not None
-
-
-class SimulatedSpectrometer:
-    """
-    Simulated spectrometer for testing without hardware.
-    Generates synthetic spectral data based on task type.
-    """
-
-    def __init__(self, num_channels: int = 257, noise_level: float = 0.02):
-        self.num_channels = num_channels
-        self.noise_level = noise_level
-        self._connected = False
-
-    def connect(self):
-        self._connected = True
-        log.info("[SIM] Simulated spectrometer connected")
-
-    def disconnect(self):
-        self._connected = False
-        log.info("[SIM] Simulated spectrometer disconnected")
-
-    def read_spectrum(self) -> np.ndarray:
-        """Generate synthetic plant reflectance spectrum."""
-        x = np.linspace(0, 1, self.num_channels)
-
-        # Simulate typical vegetation reflectance:
-        # Low in visible (absorbed), high around 700nm (red edge), plateau in NIR
-        green_peak = 0.15 * np.exp(-((x - 0.25) ** 2) / 0.005)
-        red_edge = 0.4 / (1 + np.exp(-30 * (x - 0.55)))
-        nir_plateau = 0.35 * (1 / (1 + np.exp(-20 * (x - 0.6))))
-
-        spectrum = 0.05 + green_peak + red_edge + nir_plateau
-        noise = np.random.normal(0, self.noise_level, self.num_channels)
-        spectrum += noise
-
-        return np.clip(spectrum, 0.0, 1.0)
-
-    @property
-    def is_connected(self) -> bool:
-        return self._connected
+        return self._read_sock is not None and self._write_sock is not None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -560,15 +543,12 @@ class SpectrometerPipeline:
       5. "failure"      - Error during any stage
     """
 
-    def __init__(self, bg_path: str, device=None, simulate: bool = False):
+    def __init__(self, bg_path: str, device: 'SpectrometerDevice'):
+        if device is None:
+            raise ValueError(
+                "SpectrometerPipeline requires a SpectrometerDevice instance")
         self.calibration = BackgroundCalibration(bg_path)
-
-        if simulate or device is None:
-            self.device = SimulatedSpectrometer(
-                num_channels=self.calibration.num_channels)
-        else:
-            self.device = device
-
+        self.device = device
         self.analyzer = SpectralAnalyzer(self.calibration.wavelengths)
         self._status_callback = None
         self._last_reading: Optional[SpectralReading] = None
@@ -654,13 +634,13 @@ def main():
     parser = argparse.ArgumentParser(description='ANUBIX Spectrometer Driver')
     parser.add_argument('--host', default='192.168.137.2',
                         help='Spectrometer IP (USB-Ethernet gadget)')
-    parser.add_argument('--tcp-port', type=int, default=5555,
-                        help='Spectrometer TCP port')
+    parser.add_argument('--read-port', type=int, default=5000,
+                        help='TCP port for inbound data (spectrum/acks)')
+    parser.add_argument('--write-port', type=int, default=5001,
+                        help='TCP port for outbound commands (INT:/READ)')
     parser.add_argument('--task', required=True,
                         choices=['water_stress', 'disease', 'harvest_status'],
                         help='Analysis task type')
-    parser.add_argument('--simulate', action='store_true',
-                        help='Use simulated spectrometer (no hardware)')
     parser.add_argument('--bg', default=None,
                         help='Path to background CSV (default: bg.csv next to this script)')
     parser.add_argument('--repeat', type=int, default=1,
@@ -679,20 +659,17 @@ def main():
         print(f"ERROR: Background file not found: {bg_path}")
         return 1
 
-    # Create device
-    device = None
-    if not args.simulate:
-        device = SpectrometerDevice(
-            host=args.host,
-            tcp_port=args.tcp_port,
-            num_channels=257,
-        )
+    # Create device + pipeline
+    device = SpectrometerDevice(
+        host=args.host,
+        read_port=args.read_port,
+        write_port=args.write_port,
+        num_channels=257,
+    )
 
-    # Create pipeline
     pipeline = SpectrometerPipeline(
         bg_path=bg_path,
         device=device,
-        simulate=args.simulate,
     )
 
     def status_cb(status):
@@ -702,7 +679,7 @@ def main():
 
     print(f"{'='*50}")
     print(f"  ANUBIX Spectrometer - {args.task}")
-    print(f"  Mode: {'Simulated' if args.simulate else f'{args.host}:{args.tcp_port}'}")
+    print(f"  Host: {args.host} (read={args.read_port}, write={args.write_port})")
     print(f"{'='*50}")
 
     pipeline.connect()

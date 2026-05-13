@@ -46,20 +46,21 @@ class SpectrometerNode(Node):
         super().__init__('anubix_spectrometer')
 
         # Parameters
-        self.declare_parameter('simulate', True)
         # The spectrometer presents itself as a USB-Ethernet gadget — the
-        # Jetson talks to it over TCP/IP, NOT serial.
+        # Jetson talks to it over TCP/IP, NOT serial. The sensor exposes
+        # two ports: read_port (data in) and write_port (commands out).
         self.declare_parameter('host', '192.168.137.2')
-        self.declare_parameter('tcp_port', 5555)
+        self.declare_parameter('read_port', 5000)
+        self.declare_parameter('write_port', 5001)
         self.declare_parameter('num_channels', 257)
         self.declare_parameter('integration_time_ms', 100)
         self.declare_parameter('connect_timeout_s', 5.0)
         self.declare_parameter('read_timeout_s', 5.0)
         self.declare_parameter('bg_file', '')
 
-        self._simulate = self.get_parameter('simulate').value
         self._host = self.get_parameter('host').value
-        self._tcp_port = int(self.get_parameter('tcp_port').value)
+        self._read_port = int(self.get_parameter('read_port').value)
+        self._write_port = int(self.get_parameter('write_port').value)
         self._num_channels = self.get_parameter('num_channels').value
         self._integration_time_ms = self.get_parameter('integration_time_ms').value
         self._connect_timeout_s = float(self.get_parameter('connect_timeout_s').value)
@@ -116,21 +117,19 @@ class SpectrometerNode(Node):
             String, '/spectrometer/result', pub_qos)
 
         # Initialize pipeline
-        device = None
-        if not self._simulate:
-            device = SpectrometerDevice(
-                host=self._host,
-                tcp_port=self._tcp_port,
-                num_channels=self._num_channels,
-                integration_time_ms=self._integration_time_ms,
-                connect_timeout_s=self._connect_timeout_s,
-                read_timeout_s=self._read_timeout_s,
-            )
+        device = SpectrometerDevice(
+            host=self._host,
+            read_port=self._read_port,
+            write_port=self._write_port,
+            num_channels=self._num_channels,
+            integration_time_ms=self._integration_time_ms,
+            connect_timeout_s=self._connect_timeout_s,
+            read_timeout_s=self._read_timeout_s,
+        )
 
         self._pipeline = SpectrometerPipeline(
             bg_path=self._bg_path,
             device=device,
-            simulate=self._simulate,
         )
         self._pipeline.set_status_callback(self._publish_status)
 
@@ -146,12 +145,11 @@ class SpectrometerNode(Node):
         self._force_stopped = False
         self._lock = threading.Lock()
 
-        mode = (
-            'SIMULATE' if self._simulate
-            else f'TCP {self._host}:{self._tcp_port}')
         self.get_logger().info('=' * 50)
         self.get_logger().info('  ANUBIX Spectrometer Node - Jetson Orin Nano')
-        self.get_logger().info(f'  Mode: {mode}')
+        self.get_logger().info(
+            f'  Host: TCP {self._host} '
+            f'(read={self._read_port}, write={self._write_port})')
         self.get_logger().info(f'  Channels: {self._num_channels}')
         self.get_logger().info(f'  BG file: {self._bg_path}')
         self.get_logger().info('=' * 50)
