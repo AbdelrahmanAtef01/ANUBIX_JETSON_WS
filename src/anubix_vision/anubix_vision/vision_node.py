@@ -140,6 +140,15 @@ class VisionNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=10,
         )
+        # force_stop is edge-triggered — must be VOLATILE so a stale
+        # latched True (e.g. from a previous rpi_bridge emergency stop)
+        # cannot strand this node on every restart.
+        force_stop_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=DurabilityPolicy.VOLATILE,
+        )
 
         # Subscribers
         self.create_subscription(
@@ -150,7 +159,7 @@ class VisionNode(Node):
             cmd_qos, callback_group=self._sub_group)
         self.create_subscription(
             Bool, '/supervisor/force_stop', self._on_force_stop,
-            sub_qos, callback_group=self._sub_group)
+            force_stop_qos, callback_group=self._sub_group)
         self.create_subscription(
             String, '/arm/arm_status', self._on_arm_status,
             sub_qos, callback_group=self._sub_group)

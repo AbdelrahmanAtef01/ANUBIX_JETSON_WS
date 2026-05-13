@@ -65,6 +65,14 @@ class JetsonBridgeNode(Node):
             depth=1,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
+        # force_stop is edge-triggered — VOLATILE so a stale latched
+        # True from a previous session never reaches this observer.
+        force_stop_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=DurabilityPolicy.VOLATILE,
+        )
 
         # Publishers
         self._hb_pub = self.create_publisher(
@@ -87,7 +95,7 @@ class JetsonBridgeNode(Node):
             cmd_qos, callback_group=self._sub_group)
         self.create_subscription(
             Bool, '/supervisor/force_stop', self._on_force_stop,
-            cmd_qos, callback_group=self._sub_group)
+            force_stop_qos, callback_group=self._sub_group)
         self.create_subscription(
             String, '/nav/status', self._on_nav_status,
             reliable_qos, callback_group=self._sub_group)

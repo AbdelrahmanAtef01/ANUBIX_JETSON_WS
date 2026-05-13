@@ -92,6 +92,22 @@ class AnubixMasterNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=10,
         )
+        # force_stop is an edge-triggered emergency signal — strictly
+        # VOLATILE so no publisher (master or rpi_bridge's e-stop)
+        # latches state. Without this, two publishers each carry their
+        # own latched value (TRANSIENT_LOCAL+depth=1 per publisher),
+        # late-joining consumers receive both in nondeterministic
+        # order, and a stale True from a previous rpi_bridge e-stop
+        # session can lock every Jetson stack into "force_stopped" the
+        # moment they boot. VOLATILE keeps the topic stateless: only
+        # consumers alive at publish time see the signal, which is
+        # exactly the right semantics for an emergency abort.
+        force_stop_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=DurabilityPolicy.VOLATILE,
+        )
 
         # Publishers (supervisor command channels)
         self.pub_nav_goal = self.create_publisher(PoseStamped, '/supervisor/nav_goal', cmd_qos)
@@ -105,20 +121,8 @@ class AnubixMasterNode(Node):
         self.pub_arm_nav_goal = self.create_publisher(PoseStamped, '/supervisor/arm_nav_goal', cmd_qos)
         self.pub_grip = self.create_publisher(Bool, '/supervisor/grip', cmd_qos)
         self.pub_spectral = self.create_publisher(String, '/supervisor/spectral_target', cmd_qos)
-        self.pub_force_stop = self.create_publisher(Bool, '/supervisor/force_stop', cmd_qos)
+        self.pub_force_stop = self.create_publisher(Bool, '/supervisor/force_stop', force_stop_qos)
         self.get_logger().info('[INIT] All 8 supervisor publishers created')
-
-        # Immediately publish False on /supervisor/force_stop so that any
-        # stale TRANSIENT_LOCAL latched True left over by a previous master
-        # process (e.g. one killed mid-mission) is overridden before the
-        # consumer nodes finish discovery. Without this, every restart can
-        # rejoin a previous "force_stopped" snapshot and reject every
-        # subsequent command. Edge semantics (True → abort, False → ready)
-        # are enforced by the consumer-side callbacks.
-        self.pub_force_stop.publish(Bool(data=False))
-        self.get_logger().info(
-            '[INIT] /supervisor/force_stop seeded with False '
-            '(clears any stale latched True from a prior session)')
 
         # Feedback synchronization events
         self._ev_nav = threading.Event()
@@ -266,11 +270,13 @@ class AnubixMasterNode(Node):
             return None
 
     def _do_force_stop(self) -> str:
-        # Edge-triggered: publish True so every consumer aborts whatever it
-        # is currently doing, wait long enough for the True to propagate and
-        # for callbacks to flip their _force_stopped flag, then publish
-        # False so the robot is immediately ready for the NEXT command and
-        # any late-joining subscriber does not inherit a sticky True.
+        # Edge-triggered abort: publish True so every consumer aborts
+        # whatever it is doing, wait long enough for the True to land
+        # and for callbacks to flip their _force_stopped flag, then
+        # publish False to re-arm consumers for the NEXT command. The
+        # topic is VOLATILE so no value is latched anywhere — late
+        # joiners never inherit a stale True, which is exactly the
+        # right semantics for an emergency signal.
         self.pub_force_stop.publish(Bool(data=True))
         self._force_stopped = True
         self._mission_active = False
@@ -281,8 +287,8 @@ class AnubixMasterNode(Node):
         self.pub_force_stop.publish(Bool(data=False))
         self._force_stopped = False
         self.get_logger().info(
-            '[FORCE_STOP] /supervisor/force_stop reset to False — '
-            'consumers re-armed, system ready for the next command')
+            '[FORCE_STOP] /supervisor/force_stop re-armed — '
+            'consumers ready for the next command')
         return '/system/status: force_stopped'
 
     def _do_nav_goal(self, x: float, y: float, vision: bool = False) -> str:

@@ -84,6 +84,15 @@ class ArmNode(Node):
             depth=1,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
+        # force_stop is edge-triggered — must be VOLATILE so a stale
+        # latched True (e.g. from a previous rpi_bridge emergency stop)
+        # cannot strand this node on every restart.
+        force_stop_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=DurabilityPolicy.VOLATILE,
+        )
         pub_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
@@ -104,7 +113,7 @@ class ArmNode(Node):
             Bool, '/supervisor/grip', self._on_grip, cmd_qos,
             callback_group=self._sub_group)
         self.create_subscription(
-            Bool, '/supervisor/force_stop', self._on_force_stop, cmd_qos,
+            Bool, '/supervisor/force_stop', self._on_force_stop, force_stop_qos,
             callback_group=self._sub_group)
 
         # Publishers

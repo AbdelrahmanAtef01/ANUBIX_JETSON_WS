@@ -1,47 +1,56 @@
 <!--
   CycloneDDS configuration for the Jetson Orin Nano.
 
-  Purpose: configure participant discovery over both
-    (a) the Jetson↔RPi direct ethernet link (192.168.10.0/24), and
-    (b) localhost — so that `ros2 topic list` in one terminal can see
-        topics from `ros2 launch` running in another terminal on the
-        SAME Jetson.
+  Goals:
+    (a) Local participant discovery between separate ROS terminals on
+        this Jetson always works, even when the direct-ethernet link
+        to the RPi is not yet configured (no 192.168.10.1 interface).
+    (b) Cross-machine discovery to the RPi works over the direct
+        ethernet link once 192.168.10.1 is up.
 
-  Bug fixed by this revision (was breaking item (b)):
-    - The previous config pinned the interface by name="eth0", but the
-      USB-Ethernet adapter on this Jetson enumerates as e.g.
-      "enxc9a0c19b053" — so cyclone couldn't bind it, fell back to
-      defaults, and local discovery became flaky.
-    - AllowMulticast was "false", so participants on the same machine
-      had no way to find each other.
-    - The Peers list only contained the RPi, so unicast discovery
-      between local terminals failed silently — symptom was a
-      `ros2 topic list` that randomly omitted topics from nodes that
-      were actually running fine in another terminal.
+  Why this shape:
+    Previous revisions tried to pin the interface to a hardcoded name
+    ("eth0") or hardcoded address (192.168.10.1). Both are fragile —
+    if the kernel renames the USB-Ethernet adapter, or if the user
+    boots the Jetson without the RPi cable, Cyclone has nothing to
+    bind and falls back to undefined behavior. Symptom: `ros2 node
+    list` and `ros2 topic list` return empty even though every node
+    is running fine inside the launch.
+
+    Now: we declare the direct-link IP as a "best-effort" interface
+    (presence_required=false → Cyclone does NOT fail if it is missing),
+    AND we let Cyclone autodetect the system default so there is
+    always at least one usable interface for local discovery.
 
   Network topology:
-    Jetson IP  192.168.10.1 / 24  (this machine — pinned by IP, not name)
+    Jetson IP  192.168.10.1 / 24  (this machine; optional at boot)
     RPi    IP  192.168.10.2 / 24  (peer)
 -->
 <CycloneDDS>
   <Domain id="any">
 
     <General>
-      <!--
-        Pin the DDS interface by IP address, NOT by kernel name. The
-        USB-Ethernet adapter enumerates under a different name on every
-        kernel boot (eth0 / usb0 / enx<mac> / enp3s0u1u4 / ...), so
-        name= is fragile. Address= picks the correct interface based
-        on which one carries 192.168.10.1 regardless of its kernel name.
-      -->
       <Interfaces>
-        <NetworkInterface address="192.168.10.1" priority="default" multicast="default"/>
+        <!--
+          Preferred interface: the direct ethernet link to the RPi.
+          presence_required="false" means Cyclone WILL NOT abort if
+          192.168.10.1 is not configured on any interface — it just
+          uses the autodetected one below. This is what makes local
+          discovery survive a boot without the RPi cable.
+        -->
+        <NetworkInterface address="192.168.10.1" presence_required="false" priority="10"/>
+        <!--
+          Fallback: pick the system default interface (usually built-in
+          ethernet or Wi-Fi). Guarantees local discovery always has a
+          working transport even before the direct link is up.
+        -->
+        <NetworkInterface autodetermine="true" priority="0"/>
       </Interfaces>
       <!--
         SPDP = multicast for the small Simple Participant Discovery
-        Protocol packets only; bulk data still flows unicast. This is
-        the minimum needed for local-process discovery, while keeping
-        the direct ethernet link free of heavy multicast traffic.
+        Protocol packets only; bulk data still flows unicast. The
+        minimum needed for local-process discovery without flooding
+        the direct ethernet link with heavy multicast traffic.
       -->
       <AllowMulticast>spdp</AllowMulticast>
     </General>
@@ -51,12 +60,10 @@
       <MaxAutoParticipantIndex>32</MaxAutoParticipantIndex>
       <Peers>
         <!--
-          localhost: guarantees a `ros2` CLI in a fresh terminal can
-          discover nodes that were launched in another terminal on
-          this Jetson, even with multicast off. Without this entry,
-          topics from local launches randomly disappear from
-          `ros2 topic list` — the root cause that was masquerading
-          as missing-spectrometer/arm/etc. topics.
+          localhost: belt-and-suspenders for cross-terminal discovery
+          on this Jetson, in case multicast SPDP is blocked on lo for
+          any reason. Without this, topics from local launches can
+          randomly disappear from `ros2 topic list`.
         -->
         <Peer address="localhost"/>
         <!-- Raspberry Pi over the direct ethernet link -->
