@@ -10,10 +10,11 @@ import numpy as np
 CLASS_HEALTHY_LEAF = 2
 
 
-def extract_healthy_leaves(results):
-    """Return a list of healthy-leaf dicts from a YOLO segmentation result.
+def extract_all_leaves(results):
+    """Return ALL detected masks regardless of class.
 
-    Each dict: {'centroid': (cx, cy), 'lowest_y': int, 'pts': np.ndarray}
+    Each dict: {'centroid': (cx, cy), 'lowest_y': int, 'pts': np.ndarray,
+                'cls': int, 'conf': float}
     """
     leaves = []
     if results[0].masks is None:
@@ -21,8 +22,7 @@ def extract_healthy_leaves(results):
 
     for i, mask in enumerate(results[0].masks.xy):
         cls = int(results[0].boxes.cls[i])
-        if cls != CLASS_HEALTHY_LEAF:
-            continue
+        conf = float(results[0].boxes.conf[i])
 
         mask_pts = mask.astype(int)
         moments = cv2.moments(mask_pts)
@@ -36,9 +36,19 @@ def extract_healthy_leaves(results):
             'centroid': (cx, cy),
             'lowest_y': int(np.max(mask_pts[:, 1])),
             'pts': mask_pts,
+            'cls': cls,
+            'conf': conf,
         })
 
     return leaves
+
+
+def extract_healthy_leaves(results):
+    """Return only healthy-leaf dicts from a YOLO segmentation result.
+
+    Each dict: {'centroid': (cx, cy), 'lowest_y': int, 'pts': np.ndarray}
+    """
+    return [l for l in extract_all_leaves(results) if l['cls'] == CLASS_HEALTHY_LEAF]
 
 
 def get_target_leaf(results, frame_w, frame_h):
@@ -136,16 +146,39 @@ def match_closest_leaf(results, anchor_centroid, max_dist_px=200):
     return healthy_leaves, best, best_dist
 
 
-def draw_leaves(frame, all_leaves, target_leaf):
-    """Draw all healthy leaves in blue; target leaf outline in green with centroid dot."""
+def draw_leaves(frame, all_leaves, target_leaf, all_detections=None):
+    """Draw all detected leaves with class-based coloring.
+
+    all_detections: full list from extract_all_leaves (all classes).
+                    If provided, non-healthy leaves are drawn in gray/red.
+    all_leaves:     healthy leaves only (drawn in blue).
+    target_leaf:    the chosen target (drawn in green, thicker).
+    """
+    if all_detections:
+        for leaf in all_detections:
+            if leaf.get('cls') != CLASS_HEALTHY_LEAF:
+                cv2.polylines(frame, [leaf['pts']], True, (0, 0, 180), 2)
+                cx, cy = leaf['centroid']
+                conf = leaf.get('conf', 0)
+                cv2.putText(frame, f'cls{leaf["cls"]} {conf:.0%}', (cx - 30, cy - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 180), 1)
+
     for leaf in all_leaves:
+        if target_leaf and leaf['centroid'] == target_leaf['centroid']:
+            continue
         cv2.polylines(frame, [leaf['pts']], True, (255, 0, 0), 2)
+        cx, cy = leaf['centroid']
+        conf = leaf.get('conf', 0)
+        cv2.circle(frame, (cx, cy), 4, (255, 0, 0), -1)
+        if conf:
+            cv2.putText(frame, f'{conf:.0%}', (cx - 15, cy - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
 
     if target_leaf:
         cv2.polylines(frame, [target_leaf['pts']], True, (0, 255, 0), 4)
         cx, cy = target_leaf['centroid']
         cv2.circle(frame, (cx, cy), 7, (0, 0, 255), -1)
-        cv2.putText(frame, 'TARGET LEAF', (cx - 50, cy - 20),
+        cv2.putText(frame, 'TARGET', (cx - 30, cy - 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
 

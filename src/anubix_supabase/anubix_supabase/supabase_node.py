@@ -45,6 +45,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from std_msgs.msg import String
+from geometry_msgs.msg import PoseStamped
 
 from anubix_supabase.supabase_uploader import SupabaseUploader, ReadingModel
 
@@ -122,6 +123,8 @@ class SupabaseUploaderNode(Node):
             String, '/spectrometer/result', self._on_spectral_result, reliable_qos)
         self.create_subscription(
             String, '/master/last_nav_position', self._on_nav_position, latched_qos)
+        self.create_subscription(
+            PoseStamped, '/supervisor/nav_goal', self._on_nav_goal, latched_qos)
 
         # ── Publishers ────────────────────────────────────────────────────────
         self._status_pub = self.create_publisher(
@@ -148,7 +151,15 @@ class SupabaseUploaderNode(Node):
         """Update last navigation position from master node."""
         self._last_nav_position = msg.data.strip()
         self.get_logger().debug(
-            f'[SUPABASE] Updated plant location: {self._last_nav_position}')
+            f'[SUPABASE] Updated plant location (string): {self._last_nav_position}')
+
+    def _on_nav_goal(self, msg: PoseStamped):
+        """Update position directly from nav_goal PoseStamped."""
+        x = msg.pose.position.x
+        y = msg.pose.position.y
+        self._last_nav_position = f'{x:.2f},{y:.2f}'
+        self.get_logger().info(
+            f'[SUPABASE] Updated plant location from nav_goal: {self._last_nav_position}')
 
     def _on_spectral_result(self, msg: String):
         with self._lock:
@@ -172,8 +183,7 @@ class SupabaseUploaderNode(Node):
             f'[SUPABASE] Payload — '
             f'task_type={payload.get("task_type","?")!r}  '
             f'classification={payload.get("classification","?")!r}  '
-            f'value={payload.get("value","?")}  '
-            f'confidence={payload.get("confidence","?")}')
+            f'value={payload.get("value","?")}')
 
         # Prefer IDs supplied by OmniLink (forwarded through the
         # spectrometer payload). Fall back to the node parameters only if
@@ -284,7 +294,6 @@ class SupabaseUploaderNode(Node):
         task_type      = payload.get('task_type', 'unknown')
         classification = payload.get('classification', 'unknown')
         value          = float(payload.get('value', 0.0))
-        confidence     = float(payload.get('confidence', 0.0))
 
         robot_id       = context['robot_id']
         task_id        = context['task_id']
@@ -298,7 +307,7 @@ class SupabaseUploaderNode(Node):
         self.get_logger().info(
             f'[SUPABASE] Step 2/2 — building ReadingModel: '
             f'task={task_type!r}  class={classification!r}  '
-            f'value={value:.4f}  confidence={confidence:.2%}  '
+            f'value={value:.4f}  '
             f'robot={robot_id}  task_id={task_id}  '
             f'location={plant_location!r}  '
             f'photo_url={photo_url!r}')

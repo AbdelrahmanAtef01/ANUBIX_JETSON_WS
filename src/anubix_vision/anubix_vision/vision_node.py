@@ -67,6 +67,7 @@ from anubix_vision.leaf_detection import (
     draw_grabber_ui,
     draw_hud,
     draw_leaves,
+    extract_all_leaves,
     get_closest_leaf_to_gripper,
     get_target_leaf,
     match_closest_leaf,
@@ -139,6 +140,17 @@ class VisionNode(Node):
             depth=1,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
+        # perception_goal is a command channel: each publish is a NEW
+        # command that must always be delivered even if the payload is
+        # identical to the previous one.  VOLATILE avoids DDS duplicate-
+        # suppression on TRANSIENT_LOCAL topics (which can silently drop
+        # repeated publishes of the same string, preventing re-runs).
+        goal_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=5,
+            durability=DurabilityPolicy.VOLATILE,
+        )
         sub_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
@@ -157,7 +169,7 @@ class VisionNode(Node):
         # Subscribers
         self.create_subscription(
             String, '/supervisor/perception_goal', self._on_perception_goal,
-            cmd_qos, callback_group=self._sub_group)
+            goal_qos, callback_group=self._sub_group)
         self.create_subscription(
             String, '/supervisor/target_camera', self._on_target_camera,
             cmd_qos, callback_group=self._sub_group)
@@ -292,6 +304,9 @@ class VisionNode(Node):
 
     def _run_pipeline(self, task_type: str, camera: int):
         try:
+            self._waiting_for_arm = False
+            self._arm_event.clear()
+
             self.get_logger().info(
                 f'[VISION] Pipeline START — task="{task_type}" camera={camera}')
             start_time = time.time()
@@ -419,11 +434,12 @@ class VisionNode(Node):
 
                 results = self._model.predict(
                     color_image, conf=self._confidence, verbose=False)
+                all_detections = extract_all_leaves(results)
                 all_leaves, target_leaf = get_target_leaf(results, w, h)
 
                 if self._visualize:
                     debug = color_image.copy()
-                    draw_leaves(debug, all_leaves, target_leaf)
+                    draw_leaves(debug, all_leaves, target_leaf, all_detections)
                     # Camera 1 does not see the gripper. The scoring uses
                     # the bottom-centre "grab plane" as its reference, so
                     # draw that instead of a gripper crosshair.
@@ -481,7 +497,7 @@ class VisionNode(Node):
 
                 if self._visualize:
                     final = color_image.copy()
-                    draw_leaves(final, all_leaves, target_leaf)
+                    draw_leaves(final, all_leaves, target_leaf, all_detections)
                     draw_hud(final, [
                         f'CAM 1 FOUND task={task_type}',
                         f'pixel=({cx},{cy}) depth={dist:.2f}m',
@@ -661,7 +677,10 @@ class VisionNode(Node):
             if self._visualize:
                 ret, final = cap.read()
                 if ret:
-                    draw_leaves(final, [leaf_2] if leaf_2 else [], leaf_2)
+                    final_results = self._model.predict(
+                        final, conf=self._confidence, verbose=False)
+                    final_all = extract_all_leaves(final_results)
+                    draw_leaves(final, [leaf_2] if leaf_2 else [], leaf_2, final_all)
                     draw_grabber_ui(final, gx, gy)
                     draw_hud(final, [
                         f'CAM 2 FOUND task={task_type}',
@@ -699,12 +718,13 @@ class VisionNode(Node):
 
             results = self._model.predict(
                 frame, conf=self._confidence, verbose=False)
+            all_detections = extract_all_leaves(results)
             all_leaves, target_leaf = get_closest_leaf_to_gripper(
                 results, gx, gy)
 
             if self._visualize:
                 debug = frame.copy()
-                draw_leaves(debug, all_leaves, target_leaf)
+                draw_leaves(debug, all_leaves, target_leaf, all_detections)
                 draw_grabber_ui(debug, gx, gy)
                 if target_leaf:
                     cx, cy = target_leaf['centroid']
@@ -751,12 +771,13 @@ class VisionNode(Node):
 
             results = self._model.predict(
                 frame, conf=self._confidence, verbose=False)
+            all_detections = extract_all_leaves(results)
             all_leaves, matched, match_dist = match_closest_leaf(
                 results, anchor_centroid, max_dist_px=self._tracking_max_dist)
 
             if self._visualize:
                 debug = frame.copy()
-                draw_leaves(debug, all_leaves, matched)
+                draw_leaves(debug, all_leaves, matched, all_detections)
                 draw_grabber_ui(debug, gx, gy)
                 ax, ay = anchor_centroid
                 cv2.circle(debug, (int(ax), int(ay)), 8, (0, 200, 255), 2)

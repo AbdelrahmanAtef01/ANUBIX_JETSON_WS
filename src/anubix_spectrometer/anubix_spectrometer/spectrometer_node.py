@@ -264,7 +264,6 @@ class SpectrometerNode(Node):
                 self.get_logger().info(
                     f'[SPECTRO] Analysis complete: '
                     f'classification="{result.classification}" '
-                    f'confidence={result.confidence:.2%} '
                     f'value={result.value:.4f}')
                 self.get_logger().info(
                     f'[SPECTRO] Details: {result.details}')
@@ -273,12 +272,8 @@ class SpectrometerNode(Node):
                     'task_type': result.task_type,
                     'value': result.value,
                     'classification': result.classification,
-                    'confidence': result.confidence,
                     'details': result.details,
                     'timestamp': time.time(),
-                    # Forwarded straight from /supervisor/spectral_target so
-                    # Supabase can attribute the reading to the right
-                    # robot/task without relying on hardcoded UUIDs.
                     'robot_id': robot_id,
                     'task_id': task_id,
                 }, separators=(',', ':'))

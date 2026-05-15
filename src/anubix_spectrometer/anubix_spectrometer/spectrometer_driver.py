@@ -712,15 +712,12 @@ class SpectrometerPipeline:
             ml_response = self.ml_client.predict(normalized)
             prediction = str(ml_response.get('prediction', ''))
             classification, value = self._classify(prediction)
-            confidence = float(ml_response.get('confidence', 0.0)) \
-                if isinstance(ml_response.get('confidence'), (int, float)) \
-                else 0.95
 
             result = AnalysisResult(
                 task_type=task_type,
                 value=value,
                 classification=classification,
-                confidence=confidence,
+                confidence=0.0,
                 details={
                     'ml_prediction': prediction,
                     'ml_server': self.ml_client.server_url,
@@ -831,7 +828,6 @@ def main():
                       f"{result.details.get('ml_prediction')}")
                 print(f"    Classification: {result.classification}")
                 print(f"    Value:          {result.value}")
-                print(f"    Confidence:     {result.confidence:.2%}")
             else:
                 print(f"\n  FAILED (status={status})")
             if i < args.repeat - 1:
