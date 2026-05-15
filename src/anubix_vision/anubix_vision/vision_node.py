@@ -120,6 +120,7 @@ class VisionNode(Node):
         self._active_lock = threading.Lock()
         self._active: bool = False
         self._model = None
+        self._waiting_for_arm: bool = False  # Only true when camera 2 requested arm move
 
         # Latest arm pose published by the arm node, used to build absolute
         # calibration goals instead of relative offsets.
@@ -241,10 +242,15 @@ class VisionNode(Node):
     def _on_arm_status(self, msg: String):
         status = msg.data.strip().lower()
         self.get_logger().info(f'[VISION] /arm/arm_status = "{status}"')
-        if status == 'success':
+        # Only process arm status if we're actively waiting for it (camera 2 calibration)
+        if status == 'success' and self._waiting_for_arm:
             self._arm_event.set()
+            self._waiting_for_arm = False
             self.get_logger().info(
-                '[VISION] Arm calibration move CONFIRMED')
+                '[VISION] Arm calibration move CONFIRMED (camera 2)')
+        elif status == 'success' and not self._waiting_for_arm:
+            self.get_logger().debug(
+                '[VISION] Ignoring arm status - not waiting for calibration')
 
     def _on_arm_pose(self, msg: PoseStamped):
         with self._arm_pose_lock:
@@ -769,6 +775,7 @@ class VisionNode(Node):
             latest = self._latest_arm_pose
 
         self._arm_event.clear()
+        self._waiting_for_arm = True  # Mark that we're expecting arm confirmation
 
         ps = PoseStamped()
         ps.header.stamp = self.get_clock().now().to_msg()

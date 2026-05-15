@@ -13,10 +13,12 @@ _UUID_FRAG = r'[A-Za-z0-9\-]{8,}'
 CMD_PATTERNS = [
     ("force_stop", re.compile(r'supervisor/force_stop', re.IGNORECASE)),
     ("nav_goal_home", re.compile(r'supervisor/nav_goal_home(?:_home)?', re.IGNORECASE)),
-    # nav_goal: x_y or x_y_vision-true/false
+    # nav_goal: x_y or x_y_vision-true/false or x_y_vision-true/false_robot-id
+    # Examples: nav_goal_3_5, nav_goal_3_5_vision-true, nav_goal_3_5_vision-true_robot-uuid
     ("nav_goal", re.compile(
         r'supervisor/nav_goal_([-\d]+(?:\.\d+)?)_([-\d]+(?:\.\d+)?)'
-        r'(?:_vision[-_](true|false))?',
+        r'(?:_vision[-_](true|false))?'
+        r'(?:_robot[-_](' + _UUID_FRAG + r'))?',
         re.IGNORECASE)),
     ("perception_goal", re.compile(
         r'supervisor/perception_goal_([a-z][a-z_]*)',

@@ -293,7 +293,7 @@ class AnubixMasterNode(Node):
             'consumers ready for the next command')
         return '/system/status: force_stopped'
 
-    def _do_nav_goal(self, x: float, y: float, vision: bool = False) -> str:
+    def _do_nav_goal(self, x: float, y: float, vision: bool = False, robot_id: str = '') -> str:
         ps = self._make_pose_stamped(x, y, 0.0)
         self._ev_nav.clear()
         self._fb_nav = None
@@ -301,8 +301,15 @@ class AnubixMasterNode(Node):
         # available the moment the pose arrives.
         self.pub_nav_vision.publish(Bool(data=bool(vision)))
         self.pub_nav_goal.publish(ps)
-        self.get_logger().info(
-            f'[TX] /supervisor/nav_goal ({x:.2f}, {y:.2f}) vision={vision}')
+
+        # Log robot_id if provided (for future use in navigation tracking)
+        if robot_id:
+            self.get_logger().info(
+                f'[TX] /supervisor/nav_goal ({x:.2f}, {y:.2f}) vision={vision} robot_id={robot_id}')
+        else:
+            self.get_logger().info(
+                f'[TX] /supervisor/nav_goal ({x:.2f}, {y:.2f}) vision={vision}')
+
         self.get_logger().info(
             f'[WAIT] Waiting for /nav/status (timeout={self.feedback_timeout}s)...')
         if not self._ev_nav.wait(self.feedback_timeout):
@@ -313,6 +320,10 @@ class AnubixMasterNode(Node):
             return '/nav/status: failure'
         self._position = (x, y)
         self._mission_active = True
+
+        # Include robot_id in feedback if provided
+        if robot_id:
+            return f'/nav/status: {self._fb_nav}\nrobot_id: {robot_id}'
         return f'/nav/status: {self._fb_nav}'
 
     def _do_nav_goal_home(self) -> str:
@@ -743,11 +754,13 @@ class AnubixMasterNode(Node):
         if cmd_type == 'nav_goal':
             vision_flag_str = (match.group(3) or '').lower() if match.lastindex and match.lastindex >= 3 else ''
             vision_flag = vision_flag_str == 'true'
+            robot_id_str = (match.group(4) or '').strip() if match.lastindex and match.lastindex >= 4 else ''
             return self.execute_command(
                 'nav_goal',
                 x=float(match.group(1)),
                 y=float(match.group(2)),
-                vision=vision_flag)
+                vision=vision_flag,
+                robot_id=robot_id_str)
         if cmd_type == 'target_camera':
             return self.execute_command(
                 'target_camera', camera_number=int(match.group(1)))

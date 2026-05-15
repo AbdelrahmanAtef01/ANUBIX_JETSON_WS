@@ -29,16 +29,24 @@ except ImportError:
 
 @dataclass
 class ReadingModel:
-    """Maps 1-to-1 to the Supabase 'readings' table columns."""
+    """Maps 1-to-1 to the Supabase 'readings' table columns.
+
+    Table schema (from Supabase dashboard):
+    - reading_id: uuid (auto-generated)
+    - task_id: uuid
+    - robot_id: uuid
+    - plant_location: text
+    - disease_detected: bool
+    - disease_name: text
+    - photo_1_url: text
+    - recorded_at: timestamptz
+    """
     robot_id: str
     task_id: str
     plant_location: str
     disease_detected: bool
     disease_name: str
-    water_stress_level: float = 0.0
-    harvest_details: Optional[str] = None
     photo_1_url: Optional[str] = None
-    photo_2_url: Optional[str] = None
     recorded_at: Optional[str] = None
 
     def __post_init__(self):
@@ -58,20 +66,15 @@ class ReadingModel:
         classification: str,
         value: float,
         photo_1_url: Optional[str] = None,
-        photo_2_url: Optional[str] = None,
     ) -> 'ReadingModel':
         """
         Build a ReadingModel from a SpectralAnalyzer AnalysisResult.
 
-        task_type mapping:
-          'disease'       → disease_detected / disease_name
-          'water_stress'  → water_stress_level
-          'harvest_status'→ harvest_details
+        Currently only handles disease detection. The Supabase table schema
+        only includes disease-related fields (disease_detected, disease_name).
         """
-        disease_detected    = False
-        disease_name        = 'none'
-        water_stress_level  = 0.0
-        harvest_details     = None
+        disease_detected = False
+        disease_name = 'none'
 
         if task_type == 'disease':
             disease_detected = classification in ('early_stage', 'infected')
@@ -79,22 +82,13 @@ class ReadingModel:
             # Update disease_name mapping as more pathogens are added.
             disease_name = 'TMV' if disease_detected else 'none'
 
-        elif task_type == 'water_stress':
-            water_stress_level = round(float(value), 4)
-
-        elif task_type == 'harvest_status':
-            harvest_details = classification
-
         return cls(
             robot_id=robot_id,
             task_id=task_id,
             plant_location=plant_location,
             disease_detected=disease_detected,
             disease_name=disease_name,
-            water_stress_level=water_stress_level,
-            harvest_details=harvest_details,
             photo_1_url=photo_1_url,
-            photo_2_url=photo_2_url,
         )
 
 
@@ -138,10 +132,7 @@ class SupabaseUploader:
                 f'location={reading.plant_location!r}  '
                 f'disease_detected={reading.disease_detected}  '
                 f'disease_name={reading.disease_name!r}  '
-                f'water_stress={reading.water_stress_level:.4f}  '
-                f'harvest={reading.harvest_details!r}  '
                 f'photo_1={reading.photo_1_url!r}  '
-                f'photo_2={reading.photo_2_url!r}  '
                 f'recorded_at={reading.recorded_at!r}')
 
             response = self._client.table('readings').insert(data).execute()
