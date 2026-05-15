@@ -125,7 +125,7 @@ ros2 launch anubix_bringup jetson.launch.py
   Model: ../best.engine
   RealSense SDK: AVAILABLE              (or: NOT FOUND (camera 1 disabled))
   USB camera index: 0
-  Confidence threshold: 0.5
+  Confidence threshold: 0.2
   Detection: up to 30.0s @ 2.0 Hz
   Gripper pixel (cam2 flange): (-1, -1) (<0 = frame centre)
 [VISION] YOLO model loaded successfully: ../best.engine
@@ -161,12 +161,15 @@ ros2 topic list
 ```
 /supervisor/nav_goal
 /supervisor/nav_vision
+/supervisor/robot_id           ← Robot ID (separate from nav geometry)
+/supervisor/task_id            ← Task ID (separate from nav geometry)
 /supervisor/perception_goal
 /supervisor/target_camera
 /supervisor/arm_nav_goal
 /supervisor/grip
 /supervisor/spectral_target
 /supervisor/force_stop
+/master/last_nav_position      ← Last navigation position for Supabase
 /arm/current_pose
 /nav/status
 /perception/status
@@ -446,6 +449,7 @@ ros2 topic pub --once /supervisor/perception_goal std_msgs/String '{data: "disea
 [VISION] Phase 2 COMPLETE — same leaf re-identified at (340, 240)
 [VISION] Calibration: 1.00 cm = 20.00 px  ->  1 cm = 20.00 px
 [VISION] Offset from gripper: dx=1.00 cm (Right), dy=0.00 cm (Up)
+[VISION] Depth calculation: vertical_shift=5.00px -> depth=4.00 cm (0.0400 m)
 [VISION] Published /perception/target_pose and /perception/status="found"
 [VISION] USB camera released
 ```
@@ -478,9 +482,10 @@ that match these regexes:
 |---|---|---|
 | `supervisor/force_stop` | `supervisor/force_stop` | Abort everything |
 | `supervisor/nav_goal_home` | `supervisor/nav_goal_home` | Drive to (home_x, home_y) |
-| `supervisor/nav_goal_<x>_<y>` | `supervisor/nav_goal_3_5` | Drive to (3, 5); vision=False |
-| `supervisor/nav_goal_<x>_<y>_vision-<bool>` | `supervisor/nav_goal_3_5_vision-true` | Drive to (3, 5) but stop 1 m short so the camera can take over |
-| `supervisor/target_camera_<n>` | `supervisor/target_camera_2` | Switch active camera |
+| `supervisor/nav_goal_<x>_<y>` | `supervisor/nav_goal_3_5` | Drive to (3, 5); IDs published separately to /supervisor/robot_id and /supervisor/task_id |
+| `supervisor/nav_goal_<x>_<y>\|<robot_id>\|<task_id>` | `supervisor/nav_goal_3_5\|34a957fd-...\|40e4060b-...` | Drive to (3, 5) with robot/task IDs |
+| `supervisor/nav_vision_<bool>` | `supervisor/nav_vision_true` | Set vision mode (True=stop 1m short for camera approach) |
+| `supervisor/target_camera_<n>` | `supervisor/target_camera_2` | Switch active camera (1=RealSense, 2=USB flange) |
 | `supervisor/perception_goal_<task>` | `supervisor/perception_goal_disease` | Run vision for this task |
 | `supervisor/arm_nav_goal_<signal>` | `supervisor/arm_nav_goal_move` | `move` = go to perception target, `home` = retract |
 | `supervisor/grip_<bool>` | `supervisor/grip_true` | Close (`true`) or open (`false`) gripper |
@@ -489,12 +494,19 @@ that match these regexes:
 
 ### OmniLink tool definitions
 
-Two tools accept extra fields that must be reflected in the OmniLink web UI:
+Three tools accept extra fields that must be reflected in the OmniLink web UI:
 
-- **`navigate`** — add a boolean argument `vision` (default `false`).
+- **`navigate`** — add two string arguments `robot_id` and `task_id` (UUIDs).
   When the tool fires, the agent text must include
-  `supervisor/nav_goal_<x>_<y>_vision-<true|false>`. If `vision: true` the
-  RPi nav stack stops `vision_standoff_m` (default 1.0 m) short of the goal.
+  `supervisor/nav_goal_<x>_<y>|<robot_id>|<task_id>`. IDs are published
+  separately to `/supervisor/robot_id` and `/supervisor/task_id` topics
+  (keeping navigation geometry clean). Vision mode is controlled by separate
+  `supervisor/nav_vision_<bool>` command.
+
+- **`nav_vision`** — boolean command to control vision-based approach.
+  When true, RPi nav stack stops `vision_standoff_m` (default 1.0 m) short
+  of the goal for camera-based final approach. Published to latched topic
+  `/supervisor/nav_vision`.
 
 - **`spectrometer`** — add two string arguments `robot_id` and `task_id`
   (UUIDs). When the tool fires, the agent text must include

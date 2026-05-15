@@ -15,6 +15,8 @@ CMD_PATTERNS = [
     ("nav_goal_home", re.compile(r'supervisor/nav_goal_home(?:_home)?', re.IGNORECASE)),
     # nav_goal: x_y or x_y|robot_id|task_id (pipe-separated like spectrometer)
     # Examples: nav_goal_3_5, nav_goal_3_5|robot-uuid|task-uuid
+    # IDs are published separately to /supervisor/robot_id and /supervisor/task_id
+    # to keep navigation geometry clean
     ("nav_goal", re.compile(
         r'supervisor/nav_goal_([-\d]+(?:\.\d+)?)_([-\d]+(?:\.\d+)?)'
         r'(?:\|(' + _UUID_FRAG + r'))?'

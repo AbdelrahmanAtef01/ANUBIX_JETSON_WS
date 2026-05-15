@@ -80,7 +80,7 @@ class VisionNode(Node):
 
         # Parameters
         self.declare_parameter('model_path', '../best.engine')
-        self.declare_parameter('confidence', 0.5)
+        self.declare_parameter('confidence', 0.2)
         self.declare_parameter('usb_camera_index', 0)
         self.declare_parameter('visualize', False)
         # Wall-clock seconds to keep retrying detection before giving up.
@@ -244,16 +244,14 @@ class VisionNode(Node):
 
     def _on_arm_status(self, msg: String):
         status = msg.data.strip().lower()
-        self.get_logger().info(f'[VISION] /arm/arm_status = "{status}"')
-        # Only process arm status if we're actively waiting for it (camera 2 calibration)
-        if status == 'success' and self._waiting_for_arm:
-            self._arm_event.set()
-            self._waiting_for_arm = False
-            self.get_logger().info(
-                '[VISION] Arm calibration move CONFIRMED (camera 2)')
-        elif status == 'success' and not self._waiting_for_arm:
-            self.get_logger().debug(
-                '[VISION] Ignoring arm status - not waiting for calibration')
+        # Only process and log arm status if we're actively waiting for it (camera 2 calibration)
+        if self._waiting_for_arm:
+            self.get_logger().info(f'[VISION] /arm/arm_status = "{status}"')
+            if status == 'success':
+                self._arm_event.set()
+                self._waiting_for_arm = False
+                self.get_logger().info(
+                    '[VISION] Arm calibration move CONFIRMED (camera 2)')
 
     def _on_arm_pose(self, msg: PoseStamped):
         with self._arm_pose_lock:

@@ -43,7 +43,7 @@ from typing import Optional
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from std_msgs.msg import String
 
 from anubix_supabase.supabase_uploader import SupabaseUploader, ReadingModel

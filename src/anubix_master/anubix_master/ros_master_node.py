@@ -116,6 +116,9 @@ class AnubixMasterNode(Node):
         # drives all the way to the goal. Latched (TRANSIENT_LOCAL) so the
         # nav node always sees the most recent value.
         self.pub_nav_vision = self.create_publisher(Bool, '/supervisor/nav_vision', cmd_qos)
+        # Robot/task IDs — separate from geometry, sent to RPi for navigation context
+        self.pub_robot_id = self.create_publisher(String, '/supervisor/robot_id', cmd_qos)
+        self.pub_task_id = self.create_publisher(String, '/supervisor/task_id', cmd_qos)
         self.pub_perception = self.create_publisher(String, '/supervisor/perception_goal', cmd_qos)
         self.pub_target_camera = self.create_publisher(String, '/supervisor/target_camera', cmd_qos)
         self.pub_arm_nav_goal = self.create_publisher(PoseStamped, '/supervisor/arm_nav_goal', cmd_qos)
@@ -124,7 +127,7 @@ class AnubixMasterNode(Node):
         self.pub_force_stop = self.create_publisher(Bool, '/supervisor/force_stop', force_stop_qos)
         # Publish last nav goal position for Supabase (latched so uploader always has it)
         self.pub_last_position = self.create_publisher(String, '/master/last_nav_position', cmd_qos)
-        self.get_logger().info('[INIT] All 9 supervisor publishers created')
+        self.get_logger().info('[INIT] All 11 supervisor publishers created')
 
         # Feedback synchronization events
         self._ev_nav = threading.Event()
@@ -300,6 +303,14 @@ class AnubixMasterNode(Node):
         self._ev_nav.clear()
         self._fb_nav = None
         self.pub_nav_goal.publish(ps)
+
+        # Publish robot/task IDs on separate topics (not in geometry message)
+        if robot_id:
+            self.pub_robot_id.publish(String(data=robot_id))
+            self.get_logger().debug(f'[TX] /supervisor/robot_id = "{robot_id}"')
+        if task_id:
+            self.pub_task_id.publish(String(data=task_id))
+            self.get_logger().debug(f'[TX] /supervisor/task_id = "{task_id}"')
 
         # Log with IDs if provided (for tracking)
         if robot_id or task_id:

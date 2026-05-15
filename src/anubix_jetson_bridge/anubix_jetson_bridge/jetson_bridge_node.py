@@ -45,6 +45,8 @@ class JetsonBridgeNode(Node):
         self._stats = {
             'nav_goals_dispatched': 0,
             'nav_vision_flags': 0,
+            'robot_ids_forwarded': 0,
+            'task_ids_forwarded': 0,
             'perception_goals_dispatched': 0,
             'camera_switches': 0,
             'force_stops': 0,
@@ -90,6 +92,12 @@ class JetsonBridgeNode(Node):
             cmd_qos, callback_group=self._sub_group)
         self.create_subscription(
             Bool, '/supervisor/nav_vision', self._on_nav_vision,
+            cmd_qos, callback_group=self._sub_group)
+        self.create_subscription(
+            String, '/supervisor/robot_id', self._on_robot_id,
+            cmd_qos, callback_group=self._sub_group)
+        self.create_subscription(
+            String, '/supervisor/task_id', self._on_task_id,
             cmd_qos, callback_group=self._sub_group)
         self.create_subscription(
             String, '/supervisor/perception_goal', self._on_perception_goal,
@@ -206,6 +214,24 @@ class JetsonBridgeNode(Node):
         self.get_logger().info(
             f'[BRIDGE->RPi] /supervisor/nav_vision vision={vision_flag} '
             f'[total={total}]')
+
+    def _on_robot_id(self, msg: String):
+        with self._lock:
+            self._stats['robot_ids_forwarded'] += 1
+            total = self._stats['robot_ids_forwarded']
+
+        robot_id = msg.data.strip()
+        self.get_logger().info(
+            f'[BRIDGE->RPi] /supervisor/robot_id = "{robot_id}" [total={total}]')
+
+    def _on_task_id(self, msg: String):
+        with self._lock:
+            self._stats['task_ids_forwarded'] += 1
+            total = self._stats['task_ids_forwarded']
+
+        task_id = msg.data.strip()
+        self.get_logger().info(
+            f'[BRIDGE->RPi] /supervisor/task_id = "{task_id}" [total={total}]')
 
     def _on_perception_goal(self, msg: String):
         with self._lock:
