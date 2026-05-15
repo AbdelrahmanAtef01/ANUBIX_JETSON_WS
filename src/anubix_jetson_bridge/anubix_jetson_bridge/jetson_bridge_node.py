@@ -44,6 +44,7 @@ class JetsonBridgeNode(Node):
 
         self._stats = {
             'nav_goals_dispatched': 0,
+            'nav_vision_flags': 0,
             'perception_goals_dispatched': 0,
             'camera_switches': 0,
             'force_stops': 0,
@@ -86,6 +87,9 @@ class JetsonBridgeNode(Node):
             reliable_qos, callback_group=self._sub_group)
         self.create_subscription(
             PoseStamped, '/supervisor/nav_goal', self._on_nav_goal,
+            cmd_qos, callback_group=self._sub_group)
+        self.create_subscription(
+            Bool, '/supervisor/nav_vision', self._on_nav_vision,
             cmd_qos, callback_group=self._sub_group)
         self.create_subscription(
             String, '/supervisor/perception_goal', self._on_perception_goal,
@@ -192,6 +196,16 @@ class JetsonBridgeNode(Node):
         if not rpi_ok:
             self.get_logger().warning(
                 '[BRIDGE->RPi] WARNING: RPi DISCONNECTED — nav may not receive it!')
+
+    def _on_nav_vision(self, msg: Bool):
+        with self._lock:
+            self._stats['nav_vision_flags'] += 1
+            total = self._stats['nav_vision_flags']
+
+        vision_flag = bool(msg.data)
+        self.get_logger().info(
+            f'[BRIDGE->RPi] /supervisor/nav_vision vision={vision_flag} '
+            f'[total={total}]')
 
     def _on_perception_goal(self, msg: String):
         with self._lock:

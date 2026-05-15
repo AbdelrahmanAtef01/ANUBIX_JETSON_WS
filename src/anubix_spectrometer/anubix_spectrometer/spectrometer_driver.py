@@ -642,16 +642,24 @@ class SpectrometerPipeline:
         self.device.disconnect()
 
     # ── prediction → classification mapping ─────────────────────────────────
-    # The remote ML server returns a free-form `prediction` string
-    # (pyConnect treats "With Virus" / "Healthy" as the two outcomes).
+    # The remote ML server returns a free-form `prediction` string.
+    # Current model outputs: "control with virus" or "control without virus"
+    # (older pyConnect models used "With Virus" / "Healthy").
     # The supabase_uploader expects `classification ∈ {infected,
     # early_stage, healthy, ...}`, so we collapse the ML output to those
-    # tokens here — keeping pyConnect's semantics: any mention of
-    # "virus" means infected; anything else is healthy.
+    # tokens here — any mention of "with virus" means infected; "without
+    # virus" means healthy.
     @staticmethod
     def _classify(prediction: str) -> Tuple[str, float]:
         p = (prediction or '').strip()
         p_low = p.lower()
+        # Check for "with virus" first (more specific)
+        if 'with virus' in p_low:
+            return 'infected', 1.0
+        # Check for "without virus"
+        if 'without virus' in p_low:
+            return 'healthy', 0.0
+        # Fallback: any mention of virus/disease/infected
         if 'virus' in p_low or 'disease' in p_low or 'infected' in p_low:
             return 'infected', 1.0
         return 'healthy', 0.0
