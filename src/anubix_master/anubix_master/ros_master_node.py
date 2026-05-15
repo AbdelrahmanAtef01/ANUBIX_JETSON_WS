@@ -210,7 +210,9 @@ class AnubixMasterNode(Node):
     def _cb_nav(self, msg):
         self._fb_nav = (msg.data or '').strip().lower()
         self.get_logger().info(f'[RX] /nav/status = "{self._fb_nav}"')
-        self._ev_nav.set()
+        # Only set event for terminal statuses, not "navigating"
+        if self._fb_nav in ('point_reached', 'blocked', 'failure'):
+            self._ev_nav.set()
 
     def _cb_perception(self, msg):
         self._fb_perception = (msg.data or '').strip().lower()
