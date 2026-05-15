@@ -86,8 +86,10 @@ ros2 launch anubix_bringup_rpi rpi_full.launch.py
 ```
   ANUBIX Navigation Node - Raspberry Pi
   Mode: SIMULATE
-  Nav delay: 5.0s
+  Nav delay: 2.0s
 [NAV] Subscribed to /supervisor/nav_goal (PoseStamped, TRANSIENT_LOCAL)
+[NAV] Subscribed to /supervisor/robot_id (String, TRANSIENT_LOCAL)
+[NAV] Subscribed to /supervisor/task_id (String, TRANSIENT_LOCAL)
 [NAV] Publishing on /nav/status (String, RELIABLE)
 [NAV] Ready and waiting for goals.
 [anubix_rpi_bridge]: RPi bridge ready | publishing heartbeat at 1 Hz
@@ -217,21 +219,34 @@ stops 1 m short of the goal is controlled by the **separate**
 `/supervisor/nav_vision` topic, which is *latched* — set it before
 sending the goal.
 
+The nav node also subscribes to `/supervisor/robot_id` and
+`/supervisor/task_id` (both latched) so the navigation stack always
+has the current mission context available for use during navigation.
+
 ```bash
 # 1a. (Optional) Tell nav to stop short of the goal so the camera can
 #     take over. Default is False; the master flips this for you when
 #     the OmniLink "navigate" tool fires with vision=true.
 ros2 topic pub --once /supervisor/nav_vision std_msgs/Bool '{data: true}'
 
-# 1b. Send a navigation goal
+# 1b. Publish robot_id and task_id (these are latched — set before nav_goal)
+ros2 topic pub --once /supervisor/robot_id std_msgs/String \
+  '{data: "34a957fd-d45c-4dbf-8e02-be8e1b5e349a"}'
+ros2 topic pub --once /supervisor/task_id std_msgs/String \
+  '{data: "40e4060b-5bc8-4044-9d71-046fee27a757"}'
+
+# 1c. Send a navigation goal
 ros2 topic pub --once /supervisor/nav_goal geometry_msgs/PoseStamped \
   '{header: {frame_id: "map"}, pose: {position: {x: 3.0, y: 5.0, z: 0.0}, orientation: {w: 1.0}}}'
 ```
 
 **Watch Terminal 1 (RPi):**
 ```
+[NAV] robot_id = "34a957fd-d45c-4dbf-8e02-be8e1b5e349a"
+[NAV] task_id = "40e4060b-5bc8-4044-9d71-046fee27a757"
 [NAV] ========================================
 [NAV] Goal RECEIVED: (3.000, 5.000) frame="map" vision=True
+[NAV] robot_id='34a957fd-d45c-4dbf-8e02-be8e1b5e349a' task_id='40e4060b-5bc8-4044-9d71-046fee27a757'
 [NAV] vision=True → will stop ~1.00 m short of (3.000, 5.000); on-board camera handles the rest.
 [NAV] ========================================
 [NAV] Published status: "navigating"
@@ -333,8 +348,8 @@ ros2 topic pub --once /supervisor/spectral_target std_msgs/String \
 [SPECTRO] Starting pipeline for task: "disease"
 [SPECTRO] Status published: "reading"
 [SPECTRO] Status published: "applying_ML"
-[SPECTRO] Analysis complete: classification="healthy" confidence=92.00% value=0.0000
-[SPECTRO] Details: {'red_edge_ratio': 1.45, 'nir_red_ratio': 2.31, 'chlorophyll_index': 0.18, 'disease_score': 0.0}
+[SPECTRO] Analysis complete: classification="healthy" value=0.0000
+[SPECTRO] Details: {'ml_prediction': 'healthy', 'ml_server': '...', 'num_reads': 5, 'normalized_head': [...]}
 [SPECTRO] Status published: "uploading"
 [SPECTRO] Status published: "success"
 [SPECTRO] Result published to /spectrometer/result
@@ -347,12 +362,12 @@ ros2 topic echo /spectrometer/status --once
 
 ros2 topic echo /spectrometer/result --once
 # data: '{"task_type":"disease","value":0.0,"classification":"healthy",
-#         "confidence":0.92,"details":{...},"timestamp":...,
+#         "details":{...},"timestamp":...,
 #         "robot_id":"34a957fd-...","task_id":"40e4060b-..."}'
 ```
 
 > Valid task values: `water_stress | disease | harvest_status`. Anything
-> else falls through to `classification="unknown"` and confidence=0.
+> else falls through to `classification="unknown"`.
 
 ### Test 4: Supabase Uploader (runs on Jetson, triggered by Test 3)
 
@@ -362,13 +377,13 @@ Test 3 run auto-fires an upload. No separate publish is needed.
 **Watch Terminal 2 (Jetson) right after Test 3:**
 ```
 [SUPABASE] /spectrometer/result received [total=1] — dispatching upload
-[SUPABASE] Payload — task_type='disease' classification='healthy' value=0.0 confidence=0.92
+[SUPABASE] Payload — task_type='disease' classification='healthy' value=0.0
 [SUPABASE] Using IDs from spectrometer payload: robot_id='34a957fd-...' task_id='40e4060b-...'
 [SUPABASE] Step 1/2 — capturing plant photo from USB camera
 [SUPABASE] Opening USB camera index=0
 [SUPABASE] Photo saved locally: /tmp/anubix_scan_...jpg
 [SUPABASE] Photo uploaded → https://bdkutmmrcjckaazzzspe.supabase.co/storage/v1/object/public/plant-images/scan_...jpg
-[SUPABASE] Step 2/2 — building ReadingModel: classification='healthy' ...
+[SUPABASE] Step 2/2 — building ReadingModel: task='disease' class='healthy' ...
 [SUPABASE] DB insert attempt 1/3
 [SUPABASE] Upload SUCCESS on attempt 1  (row_id=...)
 ```
@@ -576,7 +591,9 @@ Go to plant at coordinates 3,5. Check for disease using camera 1. If found, move
 [FEEDBACK -> ANUBIX] /spectrometer/status: success
 
 [SUPABASE] /spectrometer/result received [total=1] — dispatching upload
+[SUPABASE] Payload — task_type='disease' classification='healthy' value=0.0
 [SUPABASE] Using IDs from spectrometer payload: robot_id='34a957fd-...' task_id='40e4060b-...'
+[SUPABASE] Updated plant location from nav_goal: 3.00,5.00
 [SUPABASE] Step 1/2 — capturing plant photo from USB camera
 [SUPABASE] Photo uploaded → https://...
 [SUPABASE] Step 2/2 — building ReadingModel: ...
@@ -586,8 +603,11 @@ Go to plant at coordinates 3,5. Check for disease using camera 1. If found, move
 **Terminal 1 (RPi) — You should see:**
 
 ```
+[NAV] robot_id = "34a957fd-..."
+[NAV] task_id = "40e4060b-..."
 [NAV] ========================================
 [NAV] Goal RECEIVED: (3.000, 5.000) frame="map" vision=True
+[NAV] robot_id='34a957fd-...' task_id='40e4060b-...'
 [NAV] vision=True → will stop ~1.00 m short of (3.000, 5.000); on-board camera handles the rest.
 [NAV] ========================================
 [NAV] Published status: "navigating"
@@ -612,7 +632,7 @@ Mission complete. I navigated to plant at (3, 5), detected a leaf using the dept
 3. You should see a new row with:
    - `robot_id`: 34a957fd-d45c-4dbf-8e02-be8e1b5e349a
    - `task_id`: 40e4060b-5bc8-4044-9d71-046fee27a757
-   - `plant_location`: "0,0" (or whatever you set in `supabase_params.yaml`)
+   - `plant_location`: "3.00,5.00" (the last nav_goal coordinates)
    - `disease_detected`: true/false
    - `disease_name`: "TMV" or "none"
    - `photo_1_url`: https://bdkutmmrcjckaazzzspe.supabase.co/storage/v1/object/public/plant-images/scan_...jpg
@@ -789,7 +809,7 @@ The install script handles this automatically.
 ✅ **Network**: Both machines can ping each other  
 ✅ **DDS**: Topics from both sides visible with `ros2 topic list`  
 ✅ **Heartbeats**: `/bridge/jetson_heartbeat` and `/bridge/rpi_heartbeat` flowing at 1 Hz  
-✅ **Navigation**: Publishes `navigating` → `point_reached` on `/nav/status`; respects `/supervisor/nav_vision` standoff  
+✅ **Navigation**: Publishes `navigating` → `point_reached` on `/nav/status`; respects `/supervisor/nav_vision` standoff; receives `/supervisor/robot_id` and `/supervisor/task_id`  
 ✅ **Arm**: Publishes `success` on `/arm/arm_status`, `successful_grip` on `/arm/gripper_status`, `true` on `/arm/touch_status`  
 ✅ **Spectrometer**: Connects to TCP `host:5000`/`5001`, publishes `success` on `/spectrometer/status`, JSON on `/spectrometer/result` (no simulate mode)  
 ✅ **Vision**: Publishes `found` on `/perception/status`, 3D Pose on `/perception/target_pose`; camera 2 performs 2-phase calibration via the arm  

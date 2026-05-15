@@ -92,6 +92,17 @@ class AnubixMasterNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=10,
         )
+        # perception_goal is a repeated command channel: the same string
+        # (e.g. "disease") may be published multiple times and each
+        # publish must be delivered as a NEW command. TRANSIENT_LOCAL
+        # with depth=1 causes DDS to suppress re-delivery of identical
+        # payloads, so we use VOLATILE here.
+        trigger_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=200,
+            durability=DurabilityPolicy.VOLATILE,
+        )
         # force_stop is an edge-triggered emergency signal — strictly
         # VOLATILE so no publisher (master or rpi_bridge's e-stop)
         # latches state. Without this, two publishers each carry their
@@ -119,7 +130,7 @@ class AnubixMasterNode(Node):
         # Robot/task IDs — separate from geometry, sent to RPi for navigation context
         self.pub_robot_id = self.create_publisher(String, '/supervisor/robot_id', cmd_qos)
         self.pub_task_id = self.create_publisher(String, '/supervisor/task_id', cmd_qos)
-        self.pub_perception = self.create_publisher(String, '/supervisor/perception_goal', cmd_qos)
+        self.pub_perception = self.create_publisher(String, '/supervisor/perception_goal', trigger_qos)
         self.pub_target_camera = self.create_publisher(String, '/supervisor/target_camera', cmd_qos)
         self.pub_arm_nav_goal = self.create_publisher(PoseStamped, '/supervisor/arm_nav_goal', cmd_qos)
         self.pub_grip = self.create_publisher(Bool, '/supervisor/grip', cmd_qos)

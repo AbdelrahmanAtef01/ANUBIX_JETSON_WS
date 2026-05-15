@@ -68,6 +68,14 @@ class JetsonBridgeNode(Node):
             depth=1,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
+        # perception_goal uses VOLATILE so repeated identical commands
+        # are always delivered (TRANSIENT_LOCAL suppresses duplicates).
+        trigger_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=200,
+            durability=DurabilityPolicy.VOLATILE,
+        )
         # force_stop is edge-triggered — VOLATILE so a stale latched
         # True from a previous session never reaches this observer.
         force_stop_qos = QoSProfile(
@@ -101,7 +109,7 @@ class JetsonBridgeNode(Node):
             cmd_qos, callback_group=self._sub_group)
         self.create_subscription(
             String, '/supervisor/perception_goal', self._on_perception_goal,
-            cmd_qos, callback_group=self._sub_group)
+            trigger_qos, callback_group=self._sub_group)
         self.create_subscription(
             String, '/supervisor/target_camera', self._on_target_camera,
             cmd_qos, callback_group=self._sub_group)
