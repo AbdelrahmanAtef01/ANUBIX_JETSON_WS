@@ -13,12 +13,16 @@ _UUID_FRAG = r'[A-Za-z0-9\-]{8,}'
 CMD_PATTERNS = [
     ("force_stop", re.compile(r'supervisor/force_stop', re.IGNORECASE)),
     ("nav_goal_home", re.compile(r'supervisor/nav_goal_home(?:_home)?', re.IGNORECASE)),
-    # nav_goal: x_y or x_y_vision-true/false or x_y_vision-true/false_robot-id
-    # Examples: nav_goal_3_5, nav_goal_3_5_vision-true, nav_goal_3_5_vision-true_robot-uuid
+    # nav_goal: x_y or x_y|robot_id|task_id (pipe-separated like spectrometer)
+    # Examples: nav_goal_3_5, nav_goal_3_5|robot-uuid|task-uuid
     ("nav_goal", re.compile(
         r'supervisor/nav_goal_([-\d]+(?:\.\d+)?)_([-\d]+(?:\.\d+)?)'
-        r'(?:_vision[-_](true|false))?'
-        r'(?:_robot[-_](' + _UUID_FRAG + r'))?',
+        r'(?:\|(' + _UUID_FRAG + r'))?'
+        r'(?:\|(' + _UUID_FRAG + r'))?',
+        re.IGNORECASE)),
+    # nav_vision: separate command for vision mode
+    ("nav_vision", re.compile(
+        r'supervisor/nav_vision_(true|false)',
         re.IGNORECASE)),
     ("perception_goal", re.compile(
         r'supervisor/perception_goal_([a-z][a-z_]*)',
@@ -45,6 +49,7 @@ CMD_PRIORITY = {
     "force_stop": 0,
     "nav_goal_home": 1,
     "nav_goal": 2,
+    "nav_vision": 2,  # Same priority as nav_goal, can be sent together
     "target_camera": 3,
     "perception_goal": 4,
     "arm_nav_goal": 5,

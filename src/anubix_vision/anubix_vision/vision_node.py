@@ -3,17 +3,20 @@
 ANUBIX Vision Node (Jetson Orin Nano)
 ======================================
 Runs YOLO segmentation for leaf detection. Handles both RealSense (3D depth)
-and USB mono camera (flange / calibration-based distance measurement).
+and USB mono camera (flange / parallax-based depth estimation).
 
 Camera 1 (RealSense, base):
   Uses the full ``get_target_leaf`` scoring (left-half preference + middle
-  penalty) to pick the best leaf on the plant.
+  penalty) to pick the best leaf on the plant. Provides 3D coordinates from
+  hardware depth sensor.
 
 Camera 2 (USB, flange-mounted on the arm):
   Picks the leaf closest to the gripper pixel position, then re-identifies
   the SAME leaf in a second frame (after a 1 cm right calibration move)
   using a nearest-centroid match so the calibration cannot lock onto a
-  different leaf between frames.
+  different leaf between frames. Calculates:
+    - X, Y offset from horizontal displacement (calibration)
+    - Z depth from vertical parallax disparity (parallax geometry)
 
 Subscribes:
   /supervisor/perception_goal  (std_msgs/String)
@@ -24,7 +27,7 @@ Subscribes:
 
 Publishes:
   /perception/status           (std_msgs/String)        "found" | "not_found"
-  /perception/target_pose      (geometry_msgs/Pose)
+  /perception/target_pose      (geometry_msgs/Pose)     3D offset (X, Y, Z)
   /supervisor/arm_nav_goal     (geometry_msgs/PoseStamped)  absolute calibration pose
 """
 
@@ -616,6 +619,24 @@ class VisionNode(Node):
             dx_cm = dx_px / pixels_per_cm
             dy_cm = dy_px / pixels_per_cm
 
+            # Calculate depth using parallax from vertical shift between frames
+            # When arm moves horizontally 1cm, vertical pixel shift relates to depth
+            vertical_shift_px = abs(centroid_2[1] - centroid_1[1])
+
+            # Using similar triangles: depth = (baseline × pixels_per_cm) / vertical_disparity_px
+            # Baseline = calibration_cm (1.0 cm), disparity = vertical_shift_px
+            if vertical_shift_px > 0.5:  # Need measurable shift for valid depth
+                # Depth in cm from parallax geometry
+                depth_cm = (calibration_cm * pixels_per_cm) / vertical_shift_px
+                depth_m = depth_cm * 0.01
+            else:
+                # No vertical shift means leaf is very far or at optical axis
+                # Fall back to assuming it's at gripper plane
+                depth_m = 0.0
+                self.get_logger().warning(
+                    f'[VISION] Vertical shift too small ({vertical_shift_px:.2f}px) '
+                    f'for depth calculation — assuming Z=0')
+
             self.get_logger().info(
                 f'[VISION] Calibration: {calibration_cm:.2f} cm = '
                 f'{dist_px:.2f} px  ->  1 cm = {pixels_per_cm:.2f} px')
@@ -623,11 +644,15 @@ class VisionNode(Node):
                 f'[VISION] Offset from gripper: '
                 f'dx={dx_cm:.2f} cm ({"Right" if dx_cm > 0 else "Left"}), '
                 f'dy={dy_cm:.2f} cm ({"Down" if dy_cm > 0 else "Up"})')
+            self.get_logger().info(
+                f'[VISION] Depth calculation: vertical_shift={vertical_shift_px:.2f}px '
+                f'-> depth={depth_cm if vertical_shift_px > 0.5 else 0.0:.2f} cm '
+                f'({depth_m:.4f} m)')
 
             pose = Pose()
             pose.position.x = dx_cm * 0.01
             pose.position.y = -dy_cm * 0.01
-            pose.position.z = 0.0
+            pose.position.z = depth_m
             pose.orientation.w = 1.0
             self._pub_pose.publish(pose)
             self._pub_status.publish(String(data='found'))

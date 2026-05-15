@@ -89,6 +89,7 @@ class SupabaseUploaderNode(Node):
         # ── State ─────────────────────────────────────────────────────────────
         self._stats = {'results_received': 0, 'uploads_ok': 0, 'uploads_failed': 0}
         self._lock = threading.Lock()
+        self._last_nav_position = self._plant_location  # Fallback to param if no nav yet
 
         # ── Supabase client ───────────────────────────────────────────────────
         try:
@@ -108,10 +109,19 @@ class SupabaseUploaderNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=10,
         )
+        # Latched QoS for last_nav_position (always get most recent)
+        latched_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
 
         # ── Subscriptions ─────────────────────────────────────────────────────
         self.create_subscription(
             String, '/spectrometer/result', self._on_spectral_result, reliable_qos)
+        self.create_subscription(
+            String, '/master/last_nav_position', self._on_nav_position, latched_qos)
 
         # ── Publishers ────────────────────────────────────────────────────────
         self._status_pub = self.create_publisher(
@@ -132,7 +142,13 @@ class SupabaseUploaderNode(Node):
         self.get_logger().info(f'  retries        = {self._max_retries}  delay={self._retry_delay}s')
         self.get_logger().info('=' * 62)
 
-    # ── Subscriber callback ────────────────────────────────────────────────────
+    # ── Subscriber callbacks ───────────────────────────────────────────────────
+
+    def _on_nav_position(self, msg: String):
+        """Update last navigation position from master node."""
+        self._last_nav_position = msg.data.strip()
+        self.get_logger().debug(
+            f'[SUPABASE] Updated plant location: {self._last_nav_position}')
 
     def _on_spectral_result(self, msg: String):
         with self._lock:
@@ -182,7 +198,7 @@ class SupabaseUploaderNode(Node):
         context = {
             'robot_id':       robot_id,
             'task_id':        task_id,
-            'plant_location': self._plant_location,
+            'plant_location': self._last_nav_position,  # Use last nav goal position
         }
 
         threading.Thread(
