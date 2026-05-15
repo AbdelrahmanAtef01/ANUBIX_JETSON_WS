@@ -31,6 +31,7 @@ Publishes:
   /supervisor/arm_nav_goal     (geometry_msgs/PoseStamped)  absolute calibration pose
 """
 
+import queue
 import sys
 import time
 import threading
@@ -126,6 +127,16 @@ class VisionNode(Node):
         self._model = None
         self._waiting_for_arm: bool = False  # Only true when camera 2 requested arm move
 
+        # Persistent worker thread — keeps the CUDA/TensorRT context and
+        # OpenCV HighGUI state alive between pipeline runs. Spawning a new
+        # daemon thread per goal destroys the CUDA context when the thread
+        # exits, causing subsequent inference to silently fail.
+        self._work_queue: queue.Queue = queue.Queue()
+        self._model_ready = threading.Event()
+        self._worker_thread = threading.Thread(
+            target=self._worker_loop, daemon=True, name='vision_worker')
+        self._worker_thread.start()
+
         # Latest arm pose published by the arm node, used to build absolute
         # calibration goals instead of relative offsets.
         self._latest_arm_pose: PoseStamped = None
@@ -191,8 +202,12 @@ class VisionNode(Node):
         self._pub_arm_goal = self.create_publisher(
             PoseStamped, '/supervisor/arm_nav_goal', cmd_qos)
 
-        # Model load
-        self._load_model()
+        # Model is loaded on the worker thread so the CUDA/TensorRT context
+        # is owned by the same thread that does inference. Wait for it here.
+        self._model_ready.wait(timeout=60.0)
+        if self._model is None:
+            self.get_logger().error(
+                '[VISION] Model failed to load on worker thread!')
 
         self.get_logger().info('=' * 60)
         self.get_logger().info('  ANUBIX Vision Node - Jetson Orin Nano')
@@ -259,11 +274,11 @@ class VisionNode(Node):
         # Only process and log arm status if we're actively waiting for it (camera 2 calibration)
         if self._waiting_for_arm:
             self.get_logger().info(f'[VISION] /arm/arm_status = "{status}"')
-            if status == 'success':
+            if status in ('success', 'mechanical_error', 'failure'):
                 self._arm_event.set()
                 self._waiting_for_arm = False
                 self.get_logger().info(
-                    '[VISION] Arm calibration move CONFIRMED (camera 2)')
+                    f'[VISION] Arm calibration move completed: {status} (camera 2)')
 
     def _on_arm_pose(self, msg: PoseStamped):
         with self._arm_pose_lock:
@@ -290,17 +305,28 @@ class VisionNode(Node):
         with self._active_lock:
             if self._active:
                 self.get_logger().warning(
-                    '[VISION] Pipeline already running — ignoring duplicate goal')
+                    '[VISION] Pipeline already running — rejecting duplicate goal')
+                self._pub_status.publish(String(data='not_found'))
                 return
             self._active = True
 
         self._force_stopped = False
 
-        threading.Thread(
-            target=self._run_pipeline,
-            args=(task_type, self._target_camera),
-            daemon=True,
-        ).start()
+        self._work_queue.put((task_type, self._target_camera))
+
+    def _worker_loop(self):
+        """Persistent worker thread that processes pipeline goals sequentially.
+
+        Running all YOLO inference on a single long-lived thread ensures the
+        CUDA/TensorRT execution context is never destroyed between goals, and
+        OpenCV HighGUI windows remain valid across runs.
+        """
+        self._load_model()
+        self._model_ready.set()
+
+        while True:
+            task_type, camera = self._work_queue.get()
+            self._run_pipeline(task_type, camera)
 
     def _run_pipeline(self, task_type: str, camera: int):
         try:
@@ -574,9 +600,10 @@ class VisionNode(Node):
                 return
 
             self.get_logger().info(
-                f'[VISION] Waiting for /arm/arm_status="success" '
+                f'[VISION] Waiting for /arm/arm_status '
                 f'(timeout={self._arm_timeout}s)...')
             if not self._arm_event.wait(timeout=self._arm_timeout):
+                self._waiting_for_arm = False
                 self.get_logger().error(
                     '[VISION] Arm move TIMED OUT — calibration failed!')
                 self._pub_status.publish(String(data='not_found'))
