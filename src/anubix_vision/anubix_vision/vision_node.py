@@ -148,7 +148,7 @@ class VisionNode(Node):
         goal_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
-            depth=5,
+            depth=200,
             durability=DurabilityPolicy.VOLATILE,
         )
         sub_qos = QoSProfile(
@@ -440,9 +440,6 @@ class VisionNode(Node):
                 if self._visualize:
                     debug = color_image.copy()
                     draw_leaves(debug, all_leaves, target_leaf, all_detections)
-                    # Camera 1 does not see the gripper. The scoring uses
-                    # the bottom-centre "grab plane" as its reference, so
-                    # draw that instead of a gripper crosshair.
                     cv2.line(debug, (0, h - 20), (w, h - 20),
                              (200, 200, 0), 1)
                     cv2.circle(debug, (w // 2, h - 20), 6, (0, 200, 200), 2)
