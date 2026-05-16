@@ -29,7 +29,7 @@ except ImportError:
 
 def load_agent_prompt():
     """Load the ANUBIX agent prompt from file."""
-    prompt_path = r"ANUBIX_AGENT_PROMPT_v2.txt"
+    prompt_path = r"ANUBIX_AGENT_PROMPT_v3_TOOLCALLS.txt"
 
     with open(prompt_path, 'r', encoding='utf-8') as f:
         content = f.read()
@@ -55,15 +55,177 @@ def configure_agent(api_key, agent_prompt):
         print(f"❌ Error: Failed to list profiles: {e}")
         sys.exit(1)
 
-    # Agent settings
+    # Define all 11 supervisor tools
+    supervisor_tools = [
+        {
+            "name": "supervisor_robot_id",
+            "description": "Set the robot context ID for tracking",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "robot_id": {
+                        "type": "string",
+                        "description": "UUID or identifier for the robot instance"
+                    }
+                },
+                "required": ["robot_id"]
+            }
+        },
+        {
+            "name": "supervisor_task_id",
+            "description": "Set the task context ID for tracking",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "UUID or identifier for the specific task"
+                    }
+                },
+                "required": ["task_id"]
+            }
+        },
+        {
+            "name": "supervisor_nav_vision",
+            "description": "Set navigation vision mode (true=stop 1m before target for camera, false=drive all the way)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "vision": {
+                        "type": "boolean",
+                        "description": "Enable vision mode (stop before target)"
+                    }
+                },
+                "required": ["vision"]
+            }
+        },
+        {
+            "name": "supervisor_nav_goal",
+            "description": "Navigate robot to specific coordinates",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {
+                        "type": "number",
+                        "description": "X coordinate in meters"
+                    },
+                    "y": {
+                        "type": "number",
+                        "description": "Y coordinate in meters"
+                    }
+                },
+                "required": ["x", "y"]
+            }
+        },
+        {
+            "name": "supervisor_nav_goal_home",
+            "description": "Return robot to home position (0, 0)",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "supervisor_target_camera",
+            "description": "Select camera for perception (1=wide-angle, 2=telephoto)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "camera_number": {
+                        "type": "integer",
+                        "description": "Camera number (1 or 2)",
+                        "enum": [1, 2]
+                    }
+                },
+                "required": ["camera_number"]
+            }
+        },
+        {
+            "name": "supervisor_perception_goal",
+            "description": "Start perception task",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_type": {
+                        "type": "string",
+                        "description": "Type of perception task",
+                        "enum": ["disease", "water_stress", "harvest_status"]
+                    }
+                },
+                "required": ["task_type"]
+            }
+        },
+        {
+            "name": "supervisor_arm_nav_goal",
+            "description": "Move robotic arm to target or home position",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "signal": {
+                        "type": "string",
+                        "description": "move=go to target pose, home=return to safe position",
+                        "enum": ["move", "home"]
+                    }
+                },
+                "required": ["signal"]
+            }
+        },
+        {
+            "name": "supervisor_grip",
+            "description": "Control gripper (open/close)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "boolean",
+                        "description": "true=close gripper, false=open gripper"
+                    }
+                },
+                "required": ["action"]
+            }
+        },
+        {
+            "name": "supervisor_spectral_target",
+            "description": "Run spectrometer scan on target",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_type": {
+                        "type": "string",
+                        "description": "Type of spectral analysis",
+                        "enum": ["disease", "water_stress", "harvest_status"]
+                    },
+                    "robot_id": {
+                        "type": "string",
+                        "description": "Robot ID (optional, uses context if not provided)"
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Task ID (optional, uses context if not provided)"
+                    }
+                },
+                "required": ["task_type"]
+            }
+        },
+        {
+            "name": "supervisor_force_stop",
+            "description": "Emergency stop - halts all robot operations immediately",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    ]
+
+    # Agent settings with tool use enabled
     agent_settings = {
         "agentName": "ANUBIX",
         "mainTask": agent_prompt,
         "agentPersonality": "Professional",
-        "allowToolUse": False,
+        "allowToolUse": True,  # CRITICAL: Enable tool use for tool-based architecture
         "availableCommands": "",
-        "availableTools": "",
-        "availableToolDetails": [],
+        "availableTools": ",".join([t["name"] for t in supervisor_tools]),
+        "availableToolDetails": supervisor_tools,
     }
 
     # Create or update profile

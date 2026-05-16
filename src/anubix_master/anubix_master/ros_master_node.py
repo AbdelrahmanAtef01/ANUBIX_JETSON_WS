@@ -953,7 +953,11 @@ def parse_args():
                    help="Default task ID (can be overridden by commands)")
     p.add_argument('--verbose', action='store_true',
                    help="Enable debug logging")
-    return p.parse_args()
+    # Use parse_known_args to allow ROS 2 to pass through unknown arguments
+    args, unknown = p.parse_known_args()
+    if unknown:
+        log.debug(f"Ignoring unknown arguments (ROS 2 remappings): {unknown}")
+    return args
 
 
 def main():
