@@ -28,6 +28,7 @@ import logging
 import argparse
 import threading
 import http.server
+import socket
 import concurrent.futures
 from typing import Optional, Tuple
 
@@ -809,8 +810,18 @@ def main():
     print(f"  Port: {args.port}")
     print(f"  Host: {args.host}")
 
-    # Determine tool callback URL
-    tool_callback_url = args.callback_url or f"http://127.0.0.1:{args.port}/tool"
+    # Determine tool callback URL — auto-detect LAN IP so remote browsers can reach us
+    if args.callback_url:
+        tool_callback_url = args.callback_url
+    else:
+        try:
+            # Connect to an external address (no data sent) to learn our outbound LAN IP
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as _s:
+                _s.connect(("8.8.8.8", 80))
+                local_ip = _s.getsockname()[0]
+        except Exception:
+            local_ip = "127.0.0.1"
+        tool_callback_url = f"http://{local_ip}:{args.port}/tool"
     print(f"  toolCallbackUrl: {tool_callback_url}")
 
     # Initialize ROS 2
