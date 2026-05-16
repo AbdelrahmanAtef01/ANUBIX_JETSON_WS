@@ -794,9 +794,18 @@ class AnubixMasterNode(Node):
     # ── Dispatch ──────────────────────────────────────────────────────────────
 
     def _dispatch(self, cmds: list) -> str:
+        # Sort by priority and log the execution order
+        sorted_cmds = sorted(cmds, key=lambda x: CMD_PRIORITY.get(x[0], 99))
+
+        # Log execution plan with priorities
+        self.get_logger().info('[DISPATCH] Execution order (by priority):')
+        for cmd_type, match in sorted_cmds:
+            priority = CMD_PRIORITY.get(cmd_type, 99)
+            self.get_logger().info(
+                f'  [{priority}] {cmd_type}: {match.group(0)}')
+
         feedbacks = []
-        for cmd_type, match in sorted(
-                cmds, key=lambda x: CMD_PRIORITY.get(x[0], 99)):
+        for cmd_type, match in sorted_cmds:
             self.get_logger().info(f'[CMD] >>> {match.group(0)}')
             fb = self._execute_one(cmd_type, match)
             if fb:

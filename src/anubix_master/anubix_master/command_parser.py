@@ -51,17 +51,31 @@ CMD_PATTERNS = [
 ]
 
 CMD_PRIORITY = {
-    "force_stop": 0,
-    "robot_id": 1,  # Set context first
-    "task_id": 1,   # Set context first
-    "nav_goal_home": 2,
-    "nav_goal": 3,
-    "nav_vision": 3,  # Same priority as nav_goal, can be sent together
-    "target_camera": 4,
-    "perception_goal": 5,
-    "arm_nav_goal": 6,
-    "grip": 7,
-    "spectral_target": 8,
+    # CRITICAL EXECUTION ORDER CONSTRAINTS:
+    # Lower numbers execute first. DO NOT change these without understanding the dependencies.
+    #
+    # Priority groups:
+    # 0: Emergency stop (always first)
+    # 1: Context setup (robot_id, task_id) - MUST execute before commands that need them
+    # 2: Mode configuration (nav_vision) - MUST execute before the action it configures
+    # 3-4: Navigation commands
+    # 5-6: Perception commands (target_camera BEFORE perception_goal)
+    # 7-9: Manipulation and sensing commands
+    #
+    # NEVER assign the same priority to commands with ordering dependencies!
+    # See validate_priorities() below for automatic validation.
+
+    "force_stop": 0,         # Emergency abort - always first
+    "robot_id": 1,           # Set robot context - needed by nav_goal and spectral_target
+    "task_id": 1,            # Set task context - needed by nav_goal and spectral_target
+    "nav_vision": 2,         # CRITICAL: Set vision mode BEFORE nav_goal (stops 1m early if true)
+    "nav_goal_home": 3,      # Return to home position
+    "nav_goal": 4,           # Navigate to coordinates (MUST execute AFTER nav_vision)
+    "target_camera": 5,      # Select camera BEFORE starting perception
+    "perception_goal": 6,    # Start perception (uses camera set by target_camera)
+    "arm_nav_goal": 7,       # Move arm
+    "grip": 8,               # Gripper control
+    "spectral_target": 9,    # Spectrometer scan (uses robot_id/task_id from context)
 }
 
 
@@ -72,3 +86,43 @@ def parse_commands(text: str) -> List[Tuple[str, re.Match]]:
         for match in pattern.finditer(text):
             results.append((cmd_type, match))
     return results
+
+
+def validate_priorities() -> None:
+    """
+    Validate command priorities to ensure critical execution order constraints:
+    - nav_vision MUST execute before nav_goal (vision mode must be set first)
+    - target_camera SHOULD execute before perception_goal (camera must be selected)
+    - robot_id/task_id MUST execute before commands that need them
+
+    Raises ValueError if constraints are violated.
+    """
+    issues = []
+
+    # Critical: nav_vision must have lower priority number than nav_goal
+    if CMD_PRIORITY.get('nav_vision', 99) >= CMD_PRIORITY.get('nav_goal', 99):
+        issues.append(
+            'nav_vision must have LOWER priority number than nav_goal '
+            '(vision mode must be set before navigation starts)')
+
+    # Important: target_camera should execute before perception_goal
+    if CMD_PRIORITY.get('target_camera', 99) >= CMD_PRIORITY.get('perception_goal', 99):
+        issues.append(
+            'target_camera should have LOWER priority number than perception_goal '
+            '(camera must be selected before perception starts)')
+
+    # Context IDs should execute first
+    id_priority = max(CMD_PRIORITY.get('robot_id', 0), CMD_PRIORITY.get('task_id', 0))
+    for cmd in ['nav_goal', 'spectral_target']:
+        if id_priority >= CMD_PRIORITY.get(cmd, 99):
+            issues.append(
+                f'robot_id/task_id must have LOWER priority number than {cmd} '
+                '(IDs must be set before commands that need them)')
+
+    if issues:
+        raise ValueError(
+            'Command priority validation failed:\n  - ' + '\n  - '.join(issues))
+
+
+# Validate at module load time
+validate_priorities()
