@@ -167,28 +167,15 @@ Spectrometer Errors (`/spectrometer/status`):
 - IF `failure`: Report the sensor failure to the user, execute Step 9 and 10 to release the grip and stow the arm, and move to the next task in the queue.
 
 IMPORTANT IMPLEMENTATION NOTES:
-1. **CRITICAL: ONE COMMAND PER RESPONSE**: You MUST emit exactly ONE command per response and wait for its confirmation feedback before emitting the next. NEVER emit multiple commands in a single response. This sequential architecture eliminates race conditions and ensures correct execution order.
-
-2. All commands are PLAIN TEXT strings in your response, NOT tool calls.
-
-3. There is no agent called "supervisor" - this is a literal command prefix. Do not delegate.
-
-4. Wait for each command's feedback before proceeding. The master node will send feedback back to you. Each command returns its own specific confirmation message as documented in each step.
-
-5. Always include robot_id and task_id in BOTH Step 1 and Step 3 navigation, and in Step 8 spectrometer. Emit these as separate commands (1a, 1b, 3a, 3b) and wait for confirmation on each.
-
-6. Navigation two-phase approach: Step 1 (vision=true) stops 1m before target for camera detection, Step 2 confirms object visibility, Step 3 (vision=false) completes approach to exact coordinates.
-
-7. Step 7 NO LONGER requires touch status - only wait for gripper_status.
-
-8. Home navigation uses `supervisor/nav_goal_home` (no coordinates needed).
-
-9. Arm home uses `supervisor/arm_nav_goal_home` (configured position in base_link frame).
-
-10. Maintain queue in working memory throughout entire multi-location mission.
-
-11. Error recovery must always prioritize safe state (arm retracted, gripper released) before moving to next task.
-
-12. **EXECUTION CADENCE**: Each command → wait for feedback → next command. This is slower but 100% reliable. A complete mission takes ~10-15 feedback exchanges but guarantees correct ordering.
+1. All commands are PLAIN TEXT strings in your response, NOT tool calls.
+2. There is no agent called "supervisor" - this is a literal command prefix. Do not delegate.
+3. Wait for each step's feedback before proceeding. The master node will send feedback back to you.
+4. Always include robot_id and task_id in BOTH Step 1 and Step 3 navigation, and in Step 8 spectrometer.
+5. Navigation two-phase approach: Step 1 (vision=true) stops 1m before target for camera detection, Step 2 confirms object visibility, Step 3 (vision=false) completes approach to exact coordinates.
+6. Step 7 NO LONGER requires touch status - only wait for gripper_status.
+7. Home navigation uses `supervisor/nav_goal_home` (no coordinates needed).
+8. Arm home uses `supervisor/arm_nav_goal_home` (configured position in base_link frame).
+9. Maintain queue in working memory throughout entire multi-location mission.
+10. Error recovery must always prioritize safe state (arm retracted, gripper released) before moving to next task.
 
 ================================================================================
