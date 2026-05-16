@@ -3,11 +3,21 @@ anubix_arm:
     simulate: true
     arm_move_delay: 2.0
     grip_delay: 1.0
+    # Home position for arm retracted/stowed state
     # Mocked home pose published as /arm/current_pose at startup so the
     # vision node always has a base to compose calibration moves on.
+    # Used by supervisor/arm_nav_goal_home command
+    # Cartesian coordinates in base_link frame
     home_x: 0.0
     home_y: 0.0
     home_z: 0.3
+    # Joint angles for home position (radians)
+    # TODO: Configure actual joint angles for hardware arm
+    home_joint_1: 0.0  # Base rotation
+    home_joint_2: 0.0  # Shoulder
+    home_joint_3: 0.0  # Elbow
+    home_joint_4: 0.0  # Wrist pitch
+    home_joint_5: 0.0  # Wrist roll
     pose_publish_rate_hz: 5.0
     # TODO: Arm hardware parameters
     # arm_controller: "joint_trajectory_controller"
