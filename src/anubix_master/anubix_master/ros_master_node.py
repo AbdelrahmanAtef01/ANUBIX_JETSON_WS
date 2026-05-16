@@ -613,15 +613,28 @@ class AnubixOmniLinkMaster:
                 log.debug(f"[POLL] Skipping non-model message (role={role})")
                 continue
 
+            # Extract text and tool calls
             text = ''.join(p.get('text', '') for p in msg.get('parts', []))
-            log.info(f"[POLL] Model message received ({len(text)} chars)")
-            log.debug(f"[POLL] Text preview: {text[:200]}...")
+            tool_calls = []
+            for part in msg.get('parts', []):
+                if 'tool_use' in part:
+                    tool_calls.append(part['tool_use'])
 
-            cmds = parse_commands(text)
-            log.info(f"[POLL] Parsed {len(cmds)} command(s) from text")
+            log.info(f"[POLL] Model message: {len(text)} chars text, {len(tool_calls)} tool calls")
 
-            # Delegation hijack recovery
-            if not cmds and self._is_delegation_hijack(text):
+            # Try tool calls first (preferred method)
+            if tool_calls:
+                log.info(f"[POLL] Processing {len(tool_calls)} tool call(s)")
+                cmds = self._parse_tool_calls(tool_calls)
+            else:
+                # Fallback to text parsing (old method)
+                log.debug(f"[POLL] No tool calls, parsing text...")
+                cmds = parse_commands(text)
+
+            log.info(f"[POLL] Parsed {len(cmds)} command(s)")
+
+            # Delegation hijack recovery (only for text-based)
+            if not cmds and not tool_calls and self._is_delegation_hijack(text):
                 log.warning("[POLL] Delegation hijack detected - recovering...")
                 recovered = self._recover_from_delegation()
                 if recovered:
@@ -629,11 +642,15 @@ class AnubixOmniLinkMaster:
                     cmds = parse_commands(text)
 
             if not cmds:
-                log.warning("[POLL] No commands found in agent response!")
-                log.warning(f"[POLL] Agent said: {text[:300]}")
+                log.warning("[POLL] No commands found!")
+                if text:
+                    log.warning(f"[POLL] Agent text: {text[:300]}")
                 continue
 
-            self._print_agent(text)
+            if text and tool_calls:
+                self._print_agent(f"TOOL CALLS: {len(tool_calls)}")
+            elif text:
+                self._print_agent(text)
 
             # NEW ARCHITECTURE: Execute commands sequentially
             if len(cmds) > 1:
@@ -645,6 +662,92 @@ class AnubixOmniLinkMaster:
 
             self._sync_memory()
             return  # Process one batch per poll tick
+
+    # ── Tool Call Parsing ─────────────────────────────────────────────────────
+
+    def _parse_tool_calls(self, tool_calls: list) -> list:
+        """
+        Parse tool calls from agent response and convert to command tuples.
+
+        Tool call format from OmniLink:
+        {
+            'name': 'supervisor_nav_goal',
+            'input': {'x': 40.0, 'y': 45.0}
+        }
+
+        Returns: List of (cmd_type, FakeMatch) tuples compatible with _execute_one()
+        """
+        import re
+
+        class FakeMatch:
+            """Fake regex match object to work with existing _execute_one() code."""
+            def __init__(self, groups):
+                self.groups_list = groups
+                self.lastindex = len(groups) - 1 if groups else 0
+
+            def group(self, idx):
+                if idx == 0:
+                    return f"<tool_call:{self.groups_list}>"
+                if idx <= len(self.groups_list):
+                    return self.groups_list[idx - 1]
+                return ''
+
+        results = []
+
+        for tc in tool_calls:
+            name = tc.get('name', '')
+            input_params = tc.get('input', {})
+
+            log.info(f"[TOOL] {name}({input_params})")
+
+            # Map tool names to command types
+            if name == 'supervisor_robot_id':
+                results.append(('robot_id', FakeMatch([input_params.get('robot_id', '')])))
+
+            elif name == 'supervisor_task_id':
+                results.append(('task_id', FakeMatch([input_params.get('task_id', '')])))
+
+            elif name == 'supervisor_nav_vision':
+                vision_str = 'true' if input_params.get('vision') else 'false'
+                results.append(('nav_vision', FakeMatch([vision_str])))
+
+            elif name == 'supervisor_nav_goal':
+                x = str(input_params.get('x', 0))
+                y = str(input_params.get('y', 0))
+                results.append(('nav_goal', FakeMatch([x, y])))
+
+            elif name == 'supervisor_nav_goal_home':
+                results.append(('nav_goal_home', FakeMatch([])))
+
+            elif name == 'supervisor_target_camera':
+                cam = str(input_params.get('camera_number', 1))
+                results.append(('target_camera', FakeMatch([cam])))
+
+            elif name == 'supervisor_perception_goal':
+                task = input_params.get('task_type', 'disease').lower()
+                results.append(('perception_goal', FakeMatch([task])))
+
+            elif name == 'supervisor_arm_nav_goal':
+                signal = input_params.get('signal', 'move').lower()
+                results.append(('arm_nav_goal', FakeMatch([signal])))
+
+            elif name == 'supervisor_grip':
+                action_str = 'true' if input_params.get('action') else 'false'
+                results.append(('grip', FakeMatch([action_str])))
+
+            elif name == 'supervisor_spectral_target':
+                task = input_params.get('task_type', 'disease').lower()
+                rid = input_params.get('robot_id', '')
+                tid = input_params.get('task_id', '')
+                results.append(('spectral_target', FakeMatch([task, rid, tid])))
+
+            elif name == 'supervisor_force_stop':
+                results.append(('force_stop', FakeMatch([])))
+
+            else:
+                log.warning(f"[TOOL] Unknown tool: {name}")
+
+        return results
 
     # ── Delegation Hijack Recovery ────────────────────────────────────────────
 

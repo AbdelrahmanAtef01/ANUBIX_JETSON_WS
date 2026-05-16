@@ -22,6 +22,7 @@ setup(
     license='MIT',
     entry_points={
         'console_scripts': [
+            'master_node = anubix_master.ros_master_node:main',
             'ros_master_node = anubix_master.ros_master_node:main',
         ],
     },
