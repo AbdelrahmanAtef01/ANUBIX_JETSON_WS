@@ -620,9 +620,9 @@ SUPERVISOR_TOOLS = [
             "type": "object",
             "properties": {
                 "camera_number": {
-                    "type": "integer",
-                    "description": "Camera number (1 or 2)",
-                    "enum": [1, 2]
+                    "type": "string",
+                    "description": "Camera number: '1'=wide-angle, '2'=telephoto",
+                    "enum": ["1", "2"]
                 }
             },
             "required": ["camera_number"]
@@ -791,6 +791,18 @@ def parse_args():
     return args
 
 
+def _get_wifi_ip() -> str:
+    """Return the IP of the interface that has internet access (WiFi on Jetson)."""
+    try:
+        # Route a UDP packet toward the internet — OS picks the correct interface.
+        # No data is actually sent; we just read back which source IP was chosen.
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+
+
 def main():
     print("=" * 70)
     print("  ANUBIX ROS MASTER NODE - Tool Callback Architecture")
@@ -810,17 +822,11 @@ def main():
     print(f"  Port: {args.port}")
     print(f"  Host: {args.host}")
 
-    # Determine tool callback URL — auto-detect LAN IP so remote browsers can reach us
+    # Determine tool callback URL — auto-detect WiFi/internet-facing LAN IP
     if args.callback_url:
         tool_callback_url = args.callback_url
     else:
-        try:
-            # Connect to an external address (no data sent) to learn our outbound LAN IP
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as _s:
-                _s.connect(("8.8.8.8", 80))
-                local_ip = _s.getsockname()[0]
-        except Exception:
-            local_ip = "127.0.0.1"
+        local_ip = _get_wifi_ip()
         tool_callback_url = f"http://{local_ip}:{args.port}/tool"
     print(f"  toolCallbackUrl: {tool_callback_url}")
 
