@@ -389,44 +389,39 @@ class AnubixMasterNode(Node):
             feedback += f'\ntask_id: {effective_task_id}'
         return feedback
 
-    def _do_nav_vision(self, vision: bool) -> None:
+    def _do_nav_vision(self, vision: bool) -> str:
         """
-        Set navigation vision mode. No feedback expected.
+        Set navigation vision mode. Returns confirmation.
 
-        CRITICAL: Add a small delay after publishing to ensure the vision flag
-        reaches and is processed by the nav_node BEFORE the subsequent nav_goal.
-        Even though we publish in the correct priority order, DDS does not
-        guarantee message arrival order, especially across network bridges.
-        Without this delay, nav_goal can arrive first, causing the nav_node to
-        start navigation with the wrong vision mode.
+        With the new sequential command architecture, the agent waits for this
+        confirmation before sending nav_goal, ensuring proper ordering without
+        race conditions.
         """
         self.pub_nav_vision.publish(Bool(data=vision))
         self.get_logger().info(
             f'[TX] /supervisor/nav_vision = {vision}')
-
-        # Sleep 100ms to let the vision flag propagate through DDS bridges
-        # and be processed by nav_node before nav_goal arrives
-        time.sleep(0.1)
-        self.get_logger().debug('[TX] nav_vision propagation delay complete')
-        return None
+        # Small delay to ensure DDS message is sent before feedback returns
+        time.sleep(0.05)
+        return f'/supervisor/nav_vision: {vision}'
 
     def _do_nav_goal_home(self) -> str:
         self.get_logger().info(
             f'[TX] nav_goal_home -> ({self._home[0]}, {self._home[1]})')
         return self._do_nav_goal(self._home[0], self._home[1], vision=False)
 
-    def _do_target_camera(self, camera_number: int) -> None:
+    def _do_target_camera(self, camera_number: int) -> str:
         """
-        Set target camera for perception. No feedback expected.
+        Set target camera for perception. Returns confirmation.
 
-        Adds propagation delay to ensure camera selection reaches perception
-        stack before perception_goal command.
+        With the new sequential command architecture, the agent waits for this
+        confirmation before sending perception_goal, ensuring proper ordering.
         """
         self.pub_target_camera.publish(String(data=str(camera_number)))
         self._current_camera = camera_number
         self.get_logger().info(f'[TX] /supervisor/target_camera = {camera_number}')
-        time.sleep(0.05)  # 50ms propagation delay
-        return None
+        # Small delay to ensure DDS message is sent before feedback returns
+        time.sleep(0.05)
+        return f'/supervisor/target_camera: {camera_number}'
 
     def _do_perception_goal(self, task_type: str) -> str:
         self._ev_perception.clear()
@@ -825,18 +820,31 @@ class AnubixMasterNode(Node):
     # ── Dispatch ──────────────────────────────────────────────────────────────
 
     def _dispatch(self, cmds: list) -> str:
-        # Sort by priority and log the execution order
-        sorted_cmds = sorted(cmds, key=lambda x: CMD_PRIORITY.get(x[0], 99))
+        """
+        Execute commands SEQUENTIALLY in the order the agent emitted them.
 
-        # Log execution plan with priorities
-        self.get_logger().info('[DISPATCH] Execution order (by priority):')
-        for cmd_type, match in sorted_cmds:
-            priority = CMD_PRIORITY.get(cmd_type, 99)
-            self.get_logger().info(
-                f'  [{priority}] {cmd_type}: {match.group(0)}')
+        NEW ARCHITECTURE: The agent now emits ONE command at a time, waits for
+        confirmation feedback, then emits the next. This eliminates race conditions
+        and ensures commands are always executed in the correct order without
+        local reordering hacks.
+
+        We execute in parse order (order they appear in agent's text response),
+        NOT in priority order. The agent is responsible for emitting commands in
+        the correct sequence.
+        """
+        if len(cmds) > 1:
+            self.get_logger().warning(
+                f'[DISPATCH] Agent emitted {len(cmds)} commands in one response! '
+                f'Expected ONE command per response in sequential architecture. '
+                f'Executing in parse order...')
+
+        self.get_logger().info(
+            f'[DISPATCH] Executing {len(cmds)} command(s) in parse order:')
+        for idx, (cmd_type, match) in enumerate(cmds, 1):
+            self.get_logger().info(f'  [{idx}] {cmd_type}: {match.group(0)}')
 
         feedbacks = []
-        for cmd_type, match in sorted_cmds:
+        for cmd_type, match in cmds:
             self.get_logger().info(f'[CMD] >>> {match.group(0)}')
             fb = self._execute_one(cmd_type, match)
             if fb:

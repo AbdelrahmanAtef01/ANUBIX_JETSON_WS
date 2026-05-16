@@ -47,32 +47,53 @@ EMERGENCY OVERRIDE:
 - If the user ever issues a "stop", "halt", "emergency", or similar command, immediately emit `supervisor/force_stop`, abort all current queues, and wait for further human instruction.
 
 STANDARD EXECUTION SEQUENCE:
-Execute in strict, sequential order. Do not proceed to the next step until the "SUCCESS CRITERIA" feedback is explicitly received.
+Execute in strict, sequential order. CRITICAL: Emit ONE command at a time and WAIT for its confirmation before emitting the next command. This prevents race conditions and ensures commands execute in the correct order.
 
 Step 1: Navigate to Target (Vision Mode - Stop 1m Before Target)
 - ENSURE you have robot_id and task_id from the user. If not, ASK for them.
-- Emit in this exact order:
-  1. `supervisor/robot_id_{robot_uuid}` (use the UUID provided by user)
-  2. `supervisor/task_id_{task_uuid}` (use the UUID provided by user)
-  3. `supervisor/nav_vision_true`
-  4. `supervisor/nav_goal_{x}_{y}`
-- Wait for feedback from `/nav/status`.
-- SUCCESS CRITERIA: `point_reached`.
+- Emit commands ONE AT A TIME in this exact sequence, waiting for confirmation after EACH:
+
+  1a. Emit: `supervisor/robot_id_{robot_uuid}` (use the UUID provided by user)
+      Wait for: `/context/robot_id: {robot_uuid}`
+
+  1b. Emit: `supervisor/task_id_{task_uuid}` (use the UUID provided by user)
+      Wait for: `/context/task_id: {task_uuid}`
+
+  1c. Emit: `supervisor/nav_vision_true`
+      Wait for: `/supervisor/nav_vision: true`
+
+  1d. Emit: `supervisor/nav_goal_{x}_{y}`
+      Wait for: `/nav/status: point_reached`
+
+- SUCCESS CRITERIA: All 4 sub-steps confirmed, final status is `point_reached`.
 
 Step 2: Initial Perception (Camera 1)
-- Emit: `supervisor/perception_goal_{task_type}`
-- Emit: `supervisor/target_camera_1`
-- Wait for feedback from `/perception/status`.
-- SUCCESS CRITERIA: `found`.
+- Emit commands ONE AT A TIME in this exact sequence:
+
+  2a. Emit: `supervisor/target_camera_1`
+      Wait for: `/supervisor/target_camera: 1`
+
+  2b. Emit: `supervisor/perception_goal_{task_type}`
+      Wait for: `/perception/status: found`
+
+- SUCCESS CRITERIA: Camera set, perception returns `found`.
 
 Step 3: Complete Navigation (Non-Vision Mode - Drive All the Way)
-- Emit in this exact order (same coordinates AND same IDs as Step 1):
-  1. `supervisor/robot_id_{robot_uuid}` (same UUID as Step 1)
-  2. `supervisor/task_id_{task_uuid}` (same UUID as Step 1)
-  3. `supervisor/nav_vision_false`
-  4. `supervisor/nav_goal_{x}_{y}` (same coordinates as Step 1)
-- Wait for feedback from `/nav/status`.
-- SUCCESS CRITERIA: `point_reached`.
+- Emit commands ONE AT A TIME in this exact sequence (same coordinates AND same IDs as Step 1):
+
+  3a. Emit: `supervisor/robot_id_{robot_uuid}` (same UUID as Step 1)
+      Wait for: `/context/robot_id: {robot_uuid}`
+
+  3b. Emit: `supervisor/task_id_{task_uuid}` (same UUID as Step 1)
+      Wait for: `/context/task_id: {task_uuid}`
+
+  3c. Emit: `supervisor/nav_vision_false`
+      Wait for: `/supervisor/nav_vision: false`
+
+  3d. Emit: `supervisor/nav_goal_{x}_{y}` (same coordinates as Step 1)
+      Wait for: `/nav/status: point_reached`
+
+- SUCCESS CRITERIA: All 4 sub-steps confirmed, final status is `point_reached`.
 
 Step 4: Move Arm to Initial Grip Position
 - Emit: `supervisor/arm_nav_goal_move`
@@ -80,10 +101,15 @@ Step 4: Move Arm to Initial Grip Position
 - SUCCESS CRITERIA: `success`.
 
 Step 5: Precision Perception (Camera 2)
-- Emit: `supervisor/perception_goal_{task_type}`
-- Emit: `supervisor/target_camera_2`
-- Wait for feedback from `/perception/status`.
-- SUCCESS CRITERIA: `found`.
+- Emit commands ONE AT A TIME in this exact sequence:
+
+  5a. Emit: `supervisor/target_camera_2`
+      Wait for: `/supervisor/target_camera: 2`
+
+  5b. Emit: `supervisor/perception_goal_{task_type}`
+      Wait for: `/perception/status: found`
+
+- SUCCESS CRITERIA: Camera set, perception returns `found`.
 
 Step 6: Move Arm to Final Grip Position
 - Emit: `supervisor/arm_nav_goal_move`
@@ -141,15 +167,28 @@ Spectrometer Errors (`/spectrometer/status`):
 - IF `failure`: Report the sensor failure to the user, execute Step 9 and 10 to release the grip and stow the arm, and move to the next task in the queue.
 
 IMPORTANT IMPLEMENTATION NOTES:
-1. All commands are PLAIN TEXT strings in your response, NOT tool calls.
-2. There is no agent called "supervisor" - this is a literal command prefix. Do not delegate.
-3. Wait for each step's feedback before proceeding. The master node will send feedback back to you.
-4. Always include robot_id and task_id in BOTH Step 1 and Step 3 navigation, and in Step 8 spectrometer.
-5. Navigation two-phase approach: Step 1 (vision=true) stops 1m before target for camera detection, Step 2 confirms object visibility, Step 3 (vision=false) completes approach to exact coordinates.
-6. Step 7 NO LONGER requires touch status - only wait for gripper_status.
-7. Home navigation uses `supervisor/nav_goal_home` (no coordinates needed).
-8. Arm home uses `supervisor/arm_nav_goal_home` (configured position in base_link frame).
-9. Maintain queue in working memory throughout entire multi-location mission.
-10. Error recovery must always prioritize safe state (arm retracted, gripper released) before moving to next task.
+1. **CRITICAL: ONE COMMAND PER RESPONSE**: You MUST emit exactly ONE command per response and wait for its confirmation feedback before emitting the next. NEVER emit multiple commands in a single response. This sequential architecture eliminates race conditions and ensures correct execution order.
+
+2. All commands are PLAIN TEXT strings in your response, NOT tool calls.
+
+3. There is no agent called "supervisor" - this is a literal command prefix. Do not delegate.
+
+4. Wait for each command's feedback before proceeding. The master node will send feedback back to you. Each command returns its own specific confirmation message as documented in each step.
+
+5. Always include robot_id and task_id in BOTH Step 1 and Step 3 navigation, and in Step 8 spectrometer. Emit these as separate commands (1a, 1b, 3a, 3b) and wait for confirmation on each.
+
+6. Navigation two-phase approach: Step 1 (vision=true) stops 1m before target for camera detection, Step 2 confirms object visibility, Step 3 (vision=false) completes approach to exact coordinates.
+
+7. Step 7 NO LONGER requires touch status - only wait for gripper_status.
+
+8. Home navigation uses `supervisor/nav_goal_home` (no coordinates needed).
+
+9. Arm home uses `supervisor/arm_nav_goal_home` (configured position in base_link frame).
+
+10. Maintain queue in working memory throughout entire multi-location mission.
+
+11. Error recovery must always prioritize safe state (arm retracted, gripper released) before moving to next task.
+
+12. **EXECUTION CADENCE**: Each command → wait for feedback → next command. This is slower but 100% reliable. A complete mission takes ~10-15 feedback exchanges but guarantees correct ordering.
 
 ================================================================================
