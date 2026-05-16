@@ -586,11 +586,14 @@ class AnubixOmniLinkMaster:
                     break
 
             if anchor < 0:
-                log.warning("[POLL] Fingerprint not found - skipping to avoid replay")
-                self._sync_memory_stable(max_attempts=3, delay=0.3)
-                return
-
-            start = anchor + 1
+                # Fingerprint not found - memory might have been cleared or reset
+                # Use _mem_len as fallback instead of skipping
+                log.warning("[POLL] Fingerprint not found - using mem_len as fallback")
+                log.warning(f"       Last seen: {self._last_seen_fingerprint[:50]}...")
+                log.warning(f"       Memory length: {len(memory)}, cursor: {self._mem_len}")
+                start = self._mem_len
+            else:
+                start = anchor + 1
         else:
             start = self._mem_len
 
@@ -607,10 +610,15 @@ class AnubixOmniLinkMaster:
         for msg in new_messages:
             role = msg.get('role', '')
             if role != 'model':
+                log.debug(f"[POLL] Skipping non-model message (role={role})")
                 continue
 
             text = ''.join(p.get('text', '') for p in msg.get('parts', []))
+            log.info(f"[POLL] Model message received ({len(text)} chars)")
+            log.debug(f"[POLL] Text preview: {text[:200]}...")
+
             cmds = parse_commands(text)
+            log.info(f"[POLL] Parsed {len(cmds)} command(s) from text")
 
             # Delegation hijack recovery
             if not cmds and self._is_delegation_hijack(text):
@@ -621,6 +629,8 @@ class AnubixOmniLinkMaster:
                     cmds = parse_commands(text)
 
             if not cmds:
+                log.warning("[POLL] No commands found in agent response!")
+                log.warning(f"[POLL] Agent said: {text[:300]}")
                 continue
 
             self._print_agent(text)
