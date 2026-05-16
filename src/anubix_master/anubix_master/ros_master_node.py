@@ -314,17 +314,27 @@ class AnubixMasterNode(Node):
         return '/system/status: force_stopped'
 
     def _do_robot_id(self, robot_id: str) -> str:
-        """Set context robot_id for subsequent commands. Publishes immediately."""
+        """
+        Set context robot_id for subsequent commands. Publishes immediately.
+
+        Adds propagation delay to ensure ID reaches nav_node before nav_goal.
+        """
         self._context_robot_id = robot_id
         self.pub_robot_id.publish(String(data=robot_id))
         self.get_logger().info(f'[CONTEXT] robot_id set to: {robot_id}')
+        time.sleep(0.05)  # 50ms propagation delay
         return f'/context/robot_id: {robot_id}'
 
     def _do_task_id(self, task_id: str) -> str:
-        """Set context task_id for subsequent commands. Publishes immediately."""
+        """
+        Set context task_id for subsequent commands. Publishes immediately.
+
+        Adds propagation delay to ensure ID reaches nav_node before nav_goal.
+        """
         self._context_task_id = task_id
         self.pub_task_id.publish(String(data=task_id))
         self.get_logger().info(f'[CONTEXT] task_id set to: {task_id}')
+        time.sleep(0.05)  # 50ms propagation delay
         return f'/context/task_id: {task_id}'
 
     def _do_nav_goal(self, x: float, y: float, robot_id: str = '', task_id: str = '') -> str:
@@ -380,10 +390,24 @@ class AnubixMasterNode(Node):
         return feedback
 
     def _do_nav_vision(self, vision: bool) -> None:
-        """Set navigation vision mode. No feedback expected."""
+        """
+        Set navigation vision mode. No feedback expected.
+
+        CRITICAL: Add a small delay after publishing to ensure the vision flag
+        reaches and is processed by the nav_node BEFORE the subsequent nav_goal.
+        Even though we publish in the correct priority order, DDS does not
+        guarantee message arrival order, especially across network bridges.
+        Without this delay, nav_goal can arrive first, causing the nav_node to
+        start navigation with the wrong vision mode.
+        """
         self.pub_nav_vision.publish(Bool(data=vision))
         self.get_logger().info(
             f'[TX] /supervisor/nav_vision = {vision}')
+
+        # Sleep 100ms to let the vision flag propagate through DDS bridges
+        # and be processed by nav_node before nav_goal arrives
+        time.sleep(0.1)
+        self.get_logger().debug('[TX] nav_vision propagation delay complete')
         return None
 
     def _do_nav_goal_home(self) -> str:
@@ -392,9 +416,16 @@ class AnubixMasterNode(Node):
         return self._do_nav_goal(self._home[0], self._home[1], vision=False)
 
     def _do_target_camera(self, camera_number: int) -> None:
+        """
+        Set target camera for perception. No feedback expected.
+
+        Adds propagation delay to ensure camera selection reaches perception
+        stack before perception_goal command.
+        """
         self.pub_target_camera.publish(String(data=str(camera_number)))
         self._current_camera = camera_number
         self.get_logger().info(f'[TX] /supervisor/target_camera = {camera_number}')
+        time.sleep(0.05)  # 50ms propagation delay
         return None
 
     def _do_perception_goal(self, task_type: str) -> str:
