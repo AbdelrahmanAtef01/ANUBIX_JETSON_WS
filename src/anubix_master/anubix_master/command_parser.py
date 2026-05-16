@@ -12,6 +12,9 @@ _UUID_FRAG = r'[A-Za-z0-9\-]{8,}'
 
 CMD_PATTERNS = [
     ("force_stop", re.compile(r'supervisor/force_stop', re.IGNORECASE)),
+    # Standalone robot_id and task_id commands (set context for subsequent commands)
+    ("robot_id", re.compile(r'supervisor/robot_id_(' + _UUID_FRAG + r')', re.IGNORECASE)),
+    ("task_id", re.compile(r'supervisor/task_id_(' + _UUID_FRAG + r')', re.IGNORECASE)),
     ("nav_goal_home", re.compile(r'supervisor/nav_goal_home(?:_home)?', re.IGNORECASE)),
     # nav_goal: x_y or x_y|robot_id|task_id (pipe-separated like spectrometer)
     # Examples: nav_goal_3_5, nav_goal_3_5|robot-uuid|task-uuid
@@ -49,14 +52,16 @@ CMD_PATTERNS = [
 
 CMD_PRIORITY = {
     "force_stop": 0,
-    "nav_goal_home": 1,
-    "nav_goal": 2,
-    "nav_vision": 2,  # Same priority as nav_goal, can be sent together
-    "target_camera": 3,
-    "perception_goal": 4,
-    "arm_nav_goal": 5,
-    "grip": 6,
-    "spectral_target": 7,
+    "robot_id": 1,  # Set context first
+    "task_id": 1,   # Set context first
+    "nav_goal_home": 2,
+    "nav_goal": 3,
+    "nav_vision": 3,  # Same priority as nav_goal, can be sent together
+    "target_camera": 4,
+    "perception_goal": 5,
+    "arm_nav_goal": 6,
+    "grip": 7,
+    "spectral_target": 8,
 }
 
 

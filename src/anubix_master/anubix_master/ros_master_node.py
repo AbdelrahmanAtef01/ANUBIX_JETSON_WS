@@ -193,6 +193,10 @@ class AnubixMasterNode(Node):
         self._mission_active = False
         self._force_stopped = False
 
+        # Context IDs for current mission (set via robot_id/task_id commands)
+        self._context_robot_id = ''
+        self._context_task_id = ''
+
         # Memory polling state
         self._mem_len = 0
         self._last_seen_fingerprint: Optional[str] = None
@@ -309,25 +313,44 @@ class AnubixMasterNode(Node):
             'consumers ready for the next command')
         return '/system/status: force_stopped'
 
+    def _do_robot_id(self, robot_id: str) -> str:
+        """Set context robot_id for subsequent commands. Publishes immediately."""
+        self._context_robot_id = robot_id
+        self.pub_robot_id.publish(String(data=robot_id))
+        self.get_logger().info(f'[CONTEXT] robot_id set to: {robot_id}')
+        return f'/context/robot_id: {robot_id}'
+
+    def _do_task_id(self, task_id: str) -> str:
+        """Set context task_id for subsequent commands. Publishes immediately."""
+        self._context_task_id = task_id
+        self.pub_task_id.publish(String(data=task_id))
+        self.get_logger().info(f'[CONTEXT] task_id set to: {task_id}')
+        return f'/context/task_id: {task_id}'
+
     def _do_nav_goal(self, x: float, y: float, robot_id: str = '', task_id: str = '') -> str:
         ps = self._make_pose_stamped(x, y, 0.0)
         self._ev_nav.clear()
         self._fb_nav = None
         self.pub_nav_goal.publish(ps)
 
+        # Use context IDs if not explicitly provided in command
+        effective_robot_id = robot_id or self._context_robot_id
+        effective_task_id = task_id or self._context_task_id
+
         # Publish robot/task IDs on separate topics (not in geometry message)
-        if robot_id:
-            self.pub_robot_id.publish(String(data=robot_id))
-            self.get_logger().debug(f'[TX] /supervisor/robot_id = "{robot_id}"')
-        if task_id:
-            self.pub_task_id.publish(String(data=task_id))
-            self.get_logger().debug(f'[TX] /supervisor/task_id = "{task_id}"')
+        # Only publish if we have values (either from command or context)
+        if effective_robot_id:
+            self.pub_robot_id.publish(String(data=effective_robot_id))
+            self.get_logger().debug(f'[TX] /supervisor/robot_id = "{effective_robot_id}"')
+        if effective_task_id:
+            self.pub_task_id.publish(String(data=effective_task_id))
+            self.get_logger().debug(f'[TX] /supervisor/task_id = "{effective_task_id}"')
 
         # Log with IDs if provided (for tracking)
-        if robot_id or task_id:
+        if effective_robot_id or effective_task_id:
             self.get_logger().info(
                 f'[TX] /supervisor/nav_goal ({x:.2f}, {y:.2f}) '
-                f'robot_id={robot_id or "default"} task_id={task_id or "default"}')
+                f'robot_id={effective_robot_id or "default"} task_id={effective_task_id or "default"}')
         else:
             self.get_logger().info(
                 f'[TX] /supervisor/nav_goal ({x:.2f}, {y:.2f})')
@@ -348,12 +371,12 @@ class AnubixMasterNode(Node):
         self.pub_last_position.publish(String(data=position_str))
         self.get_logger().debug(f'[TX] /master/last_nav_position = "{position_str}"')
 
-        # Include IDs in feedback if provided
+        # Include IDs in feedback if we have them
         feedback = f'/nav/status: {self._fb_nav}'
-        if robot_id:
-            feedback += f'\nrobot_id: {robot_id}'
-        if task_id:
-            feedback += f'\ntask_id: {task_id}'
+        if effective_robot_id:
+            feedback += f'\nrobot_id: {effective_robot_id}'
+        if effective_task_id:
+            feedback += f'\ntask_id: {effective_task_id}'
         return feedback
 
     def _do_nav_vision(self, vision: bool) -> None:
@@ -484,8 +507,9 @@ class AnubixMasterNode(Node):
         # OmniLink supplies robot_id/task_id with each spectrometer call.
         # We forward them verbatim so the Supabase uploader can attribute
         # the reading to the correct robot/task without hardcoded UUIDs.
-        rid = (robot_id or self._robot_id or '').strip()
-        tid = (task_id or self._task_id or '').strip()
+        # Use context IDs if not explicitly provided in command
+        rid = (robot_id or self._context_robot_id or self._robot_id or '').strip()
+        tid = (task_id or self._context_task_id or self._task_id or '').strip()
         payload = task_type
         if rid or tid:
             payload = f'{task_type}|{rid}|{tid}'
@@ -786,6 +810,10 @@ class AnubixMasterNode(Node):
     def _execute_one(self, cmd_type: str, match: re.Match) -> Optional[str]:
         if cmd_type == 'force_stop':
             return self.execute_command('force_stop')
+        if cmd_type == 'robot_id':
+            return self.execute_command('robot_id', robot_id=match.group(1))
+        if cmd_type == 'task_id':
+            return self.execute_command('task_id', task_id=match.group(1))
         if cmd_type == 'nav_goal_home':
             return self.execute_command('nav_goal_home')
         if cmd_type == 'nav_goal':
