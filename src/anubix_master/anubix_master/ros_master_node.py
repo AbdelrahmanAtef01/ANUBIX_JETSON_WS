@@ -29,6 +29,7 @@ import argparse
 import threading
 import http.server
 import socket
+import subprocess
 import concurrent.futures
 from typing import Optional, Tuple
 
@@ -794,13 +795,43 @@ def parse_args():
 def _get_wifi_ip() -> str:
     """Return the IP of the interface that has internet access (WiFi on Jetson)."""
     try:
-        # Route a UDP packet toward the internet — OS picks the correct interface.
-        # No data is actually sent; we just read back which source IP was chosen.
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))
             return s.getsockname()[0]
     except Exception:
         return "127.0.0.1"
+
+
+def _start_ngrok(port: int) -> str:
+    """Start ngrok tunnel for the given port and return the public HTTPS URL."""
+    # Kill any existing ngrok process to avoid conflicts
+    subprocess.run(["pkill", "-f", "ngrok"], capture_output=True)
+    time.sleep(1)
+
+    proc = subprocess.Popen(
+        ["ngrok", "http", str(port), "--log=stdout", "--log-format=json"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+
+    # Read ngrok JSON log lines until we see the tunnel URL (up to 15s)
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        line = proc.stdout.readline()
+        if not line:
+            break
+        try:
+            entry = json.loads(line.decode())
+            # ngrok emits {"url":"https://..."} when the tunnel is ready
+            url = entry.get("url", "")
+            if url.startswith("https://"):
+                print(f"  ngrok tunnel established: {url}")
+                return url.rstrip("/")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+
+    proc.kill()
+    raise RuntimeError("ngrok did not start within 15 seconds — is it installed and authenticated?")
 
 
 def main():
@@ -822,12 +853,19 @@ def main():
     print(f"  Port: {args.port}")
     print(f"  Host: {args.host}")
 
-    # Determine tool callback URL — auto-detect WiFi/internet-facing LAN IP
+    # Determine tool callback URL
     if args.callback_url:
         tool_callback_url = args.callback_url
     else:
-        local_ip = _get_wifi_ip()
-        tool_callback_url = f"http://{local_ip}:{args.port}/tool"
+        print("  Starting ngrok tunnel...")
+        try:
+            ngrok_base = _start_ngrok(args.port)
+            tool_callback_url = f"{ngrok_base}/tool"
+        except RuntimeError as e:
+            print(f"  WARNING: {e}")
+            print("  Falling back to local IP (remote browsers may not work)")
+            local_ip = _get_wifi_ip()
+            tool_callback_url = f"http://{local_ip}:{args.port}/tool"
     print(f"  toolCallbackUrl: {tool_callback_url}")
 
     # Initialize ROS 2
