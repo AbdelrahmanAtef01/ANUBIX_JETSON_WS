@@ -68,6 +68,8 @@ def verify_configuration():
         ("Tool Use Enabled", settings.get('allowToolUse') == True),
         ("Main Task Present", len(settings.get('mainTask', '')) > 100),
         ("Tools Configured", len(settings.get('availableToolDetails', [])) == 11),
+        ("toolCallbackUrl Set", bool(settings.get('toolCallbackUrl'))),
+        ("maxToolRounds Set", settings.get('maxToolRounds', 0) >= 11),
     ]
 
     print("\nConfiguration Checks:")
@@ -114,6 +116,25 @@ def verify_configuration():
 
     if not missing:
         print(f"\n✅ All 11 supervisor tools properly configured")
+
+    # Check toolCallbackUrl
+    callback_url = settings.get('toolCallbackUrl', '')
+    if callback_url:
+        print(f"\n✅ toolCallbackUrl: {callback_url}")
+        print("   (Ensure the master node is running on that address)")
+        try:
+            import requests
+            health_url = callback_url.replace('/tool', '/health')
+            resp = requests.get(health_url, timeout=3)
+            if resp.ok:
+                print(f"✅ Tool callback server is reachable")
+            else:
+                print(f"⚠️  Tool callback server returned {resp.status_code}")
+        except Exception:
+            print(f"⚠️  Tool callback server not reachable (is master node running?)")
+    else:
+        print("\n❌ toolCallbackUrl NOT set - tool calls from web UI will fail!")
+        all_passed = False
 
     # Test agent responsiveness
     print("\nTesting Agent Communication:")

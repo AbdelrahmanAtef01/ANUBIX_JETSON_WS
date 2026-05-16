@@ -1,43 +1,34 @@
 #!/usr/bin/env python3
 """
-ANUBIX ROS 2 Master Node - Clean Rebuild
-==========================================
+ANUBIX ROS 2 Master Node - Tool Callback Architecture
+======================================================
 Bridges ANUBIX OmniLink agent to four ROS 2 subsystems on Jetson + RPi.
 
-Architecture:
-- Polls OmniLink memory for new model messages containing supervisor/* commands
-- Executes commands ONE AT A TIME (sequential architecture, no batch dispatch)
-- Publishes to appropriate ROS 2 command topics
-- Waits for feedback from status topics
-- Sends formatted feedback back to OmniLink agent
-- Agent waits for confirmation before sending next command
+Architecture (toolCallbackUrl):
+- Runs an HTTP server on a configurable port (default 5055)
+- Registers the server URL as toolCallbackUrl in the ANUBIX agent profile
+- When user sends a message via OmniLink web UI:
+  1. OmniLink platform calls AI engine with tool definitions
+  2. AI responds with structured toolCalls (e.g. supervisor_nav_goal)
+  3. Web UI frontend POSTs tool call to our HTTP server
+  4. We execute the command via ROS 2, wait for feedback
+  5. Return the result JSON to the frontend
+  6. Frontend sends result back to AI for the next tool call
+  7. Loop continues until no more tool calls (maxToolRounds)
 
-Command Flow:
-  Agent → supervisor/robot_id_xxx → Master publishes /supervisor/robot_id
-                                   → Returns /context/robot_id: xxx
-  Agent receives confirmation
-  Agent → supervisor/nav_vision_true → Master publishes /supervisor/nav_vision
-                                      → Returns /supervisor/nav_vision: true
-  Agent receives confirmation
-  Agent → supervisor/nav_goal_40_45 → Master publishes /supervisor/nav_goal
-                                     → Waits for /nav/status
-                                     → Returns /nav/status: point_reached
-
-Key Features:
-- Fingerprint-based memory tracking (never replays history)
-- Delegation-hijack recovery (handles OmniLink routing "supervisor/" as agent name)
-- Clean separation between OmniLink polling and ROS execution
-- Proper QoS profiles for latched commands vs streaming feedback
-- Sequential execution (one command at a time, no race conditions)
+This is the correct OmniLink Agents architecture - no memory polling needed.
+The web UI drives the tool-call loop automatically.
 """
 
 import os
-import re
 import sys
+import json
 import time
 import logging
 import argparse
 import threading
+import http.server
+import concurrent.futures
 from typing import Optional, Tuple
 
 try:
@@ -68,40 +59,6 @@ log = logging.getLogger("anubix_master")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Command Parser
-# ─────────────────────────────────────────────────────────────────────────────
-
-_UUID_FRAG = r'[A-Za-z0-9\-]{8,}'
-
-CMD_PATTERNS = [
-    ("force_stop", re.compile(r'supervisor/force_stop', re.IGNORECASE)),
-    ("robot_id", re.compile(r'supervisor/robot_id_(' + _UUID_FRAG + r')', re.IGNORECASE)),
-    ("task_id", re.compile(r'supervisor/task_id_(' + _UUID_FRAG + r')', re.IGNORECASE)),
-    ("nav_goal_home", re.compile(r'supervisor/nav_goal_home', re.IGNORECASE)),
-    ("nav_vision", re.compile(r'supervisor/nav_vision_(true|false)', re.IGNORECASE)),
-    ("nav_goal", re.compile(r'supervisor/nav_goal_([-\d]+(?:\.\d+)?)_([-\d]+(?:\.\d+)?)', re.IGNORECASE)),
-    ("target_camera", re.compile(r'supervisor/target_camera_(\d+)', re.IGNORECASE)),
-    ("perception_goal", re.compile(r'supervisor/perception_goal_([a-z][a-z_]*)', re.IGNORECASE)),
-    ("arm_nav_goal", re.compile(r'supervisor/arm_nav_goal_([a-z]+)', re.IGNORECASE)),
-    ("grip", re.compile(r'supervisor/grip_(true|false)', re.IGNORECASE)),
-    ("spectral_target", re.compile(
-        r'supervisor/spectral_target_([a-z][a-z_]*)'
-        r'(?:\|(' + _UUID_FRAG + r'))?'
-        r'(?:\|(' + _UUID_FRAG + r'))?',
-        re.IGNORECASE)),
-]
-
-
-def parse_commands(text: str):
-    """Extract all supervisor/* commands from agent text response."""
-    results = []
-    for cmd_type, pattern in CMD_PATTERNS:
-        for match in pattern.finditer(text):
-            results.append((cmd_type, match))
-    return results
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # ROS 2 Bridge
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -112,10 +69,7 @@ class AnubixROSBridge(Node):
     Each execute() call:
     1. Publishes the command to the appropriate supervisor/* topic
     2. Blocks until feedback arrives on the corresponding status topic
-    3. Returns formatted feedback string for OmniLink agent
-
-    Runs a background executor thread so callbacks can fire while main thread
-    is polling OmniLink.
+    3. Returns formatted feedback string
     """
 
     def __init__(self,
@@ -128,17 +82,14 @@ class AnubixROSBridge(Node):
         self.feedback_timeout = feedback_timeout
         self.arm_home_pose = arm_home_pose
 
-        # Context IDs (can be overridden by robot_id/task_id commands)
         self._context_robot_id = robot_id
         self._context_task_id = task_id
 
-        # State tracking
         self._force_stopped = False
         self._latest_target_pose: Optional[Pose] = None
         self._target_pose_lock = threading.Lock()
         self._post_release_retract = False
 
-        # Reentrant callback group for all subscriptions
         self._sub_group = ReentrantCallbackGroup()
 
         # QoS profiles
@@ -146,19 +97,19 @@ class AnubixROSBridge(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,  # Latched
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         trigger_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
             depth=200,
-            durability=DurabilityPolicy.VOLATILE,  # Not latched
+            durability=DurabilityPolicy.VOLATILE,
         )
         force_stop_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
-            durability=DurabilityPolicy.VOLATILE,  # Edge-triggered
+            durability=DurabilityPolicy.VOLATILE,
         )
         sub_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -262,7 +213,7 @@ class AnubixROSBridge(Node):
             self._force_stopped = False
             log.info("[RX] Force stop cleared")
 
-    # ── Public API (called by OmniLink master) ────────────────────────────────
+    # ── Public API ────────────────────────────────────────────────────────────
 
     def execute(self, cmd_type: str, **kwargs) -> Optional[str]:
         """Execute a single command and return feedback string."""
@@ -297,20 +248,20 @@ class AnubixROSBridge(Node):
         self._context_robot_id = robot_id
         self.pub_robot_id.publish(String(data=robot_id))
         log.info(f"[TX] /supervisor/robot_id = '{robot_id}'")
-        time.sleep(0.05)  # DDS propagation delay
+        time.sleep(0.05)
         return f'/context/robot_id: {robot_id}'
 
     def _do_task_id(self, task_id: str) -> str:
         self._context_task_id = task_id
         self.pub_task_id.publish(String(data=task_id))
         log.info(f"[TX] /supervisor/task_id = '{task_id}'")
-        time.sleep(0.05)  # DDS propagation delay
+        time.sleep(0.05)
         return f'/context/task_id: {task_id}'
 
     def _do_nav_vision(self, vision: bool) -> str:
         self.pub_nav_vision.publish(Bool(data=vision))
         log.info(f"[TX] /supervisor/nav_vision = {vision}")
-        time.sleep(0.1)  # DDS propagation delay
+        time.sleep(0.1)
         return f'/supervisor/nav_vision: {vision}'
 
     def _do_nav_goal(self, x: float, y: float) -> str:
@@ -318,7 +269,6 @@ class AnubixROSBridge(Node):
         self._ev_nav.clear()
         self._fb_nav = None
 
-        # Publish IDs alongside nav_goal (for nav_node on RPi)
         if self._context_robot_id:
             self.pub_robot_id.publish(String(data=self._context_robot_id))
         if self._context_task_id:
@@ -341,7 +291,7 @@ class AnubixROSBridge(Node):
     def _do_target_camera(self, camera_number: int) -> str:
         self.pub_target_camera.publish(String(data=str(camera_number)))
         log.info(f"[TX] /supervisor/target_camera = {camera_number}")
-        time.sleep(0.05)  # DDS propagation delay
+        time.sleep(0.05)
         return f'/supervisor/target_camera: {camera_number}'
 
     def _do_perception_goal(self, task_type: str) -> str:
@@ -406,13 +356,11 @@ class AnubixROSBridge(Node):
         gripper_line = f'/arm/gripper_status: {self._fb_gripper}'
 
         if not action:
-            # Release - arm post-release retract guard
             if self._fb_gripper == 'successful_release':
                 self._post_release_retract = True
                 log.info("[GRIP] Post-release retract armed")
             return gripper_line
 
-        # Close - wait for touch sensor
         if not self._ev_touch.wait(self.feedback_timeout):
             log.warning("[TIMEOUT] No /arm/touch_status received, assuming false")
             touch_line = '/arm/touch_status: false'
@@ -422,7 +370,6 @@ class AnubixROSBridge(Node):
         return f'{gripper_line}\n{touch_line}'
 
     def _do_spectral_target(self, task_type: str, robot_id: str = '', task_id: str = '') -> str:
-        # Use context IDs if not explicitly provided
         rid = robot_id or self._context_robot_id or ''
         tid = task_id or self._context_task_id or ''
 
@@ -455,484 +402,364 @@ class AnubixROSBridge(Node):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# OmniLink Master
+# Tool Callback HTTP Server
 # ─────────────────────────────────────────────────────────────────────────────
 
-class AnubixOmniLinkMaster:
+class ToolCallbackHandler(http.server.BaseHTTPRequestHandler):
+    """HTTP handler for OmniLink tool callbacks.
+
+    The OmniLink web UI frontend POSTs tool calls here when the AI agent
+    emits a structured toolCall. We execute the tool via ROS 2 and return
+    the result so the frontend can feed it back to the AI.
+
+    POST body format from OmniLink frontend:
+        {"tool": "supervisor_nav_goal", "x": 40.0, "y": 45.0}
+
+    Response format:
+        {"status": "ok", "tool": "supervisor_nav_goal", "result": {...}}
     """
-    Polls OmniLink memory, detects new commands, dispatches to ROS bridge,
-    and sends feedback back to agent.
 
-    Clean separation: this class handles OmniLink, AnubixROSBridge handles ROS.
-    """
+    bridge: Optional['AnubixROSBridge'] = None
 
-    AGENT_NAME = "ANUBIX"
-    ENGINE = "g1-engine"
+    def log_message(self, fmt, *args):
+        log.debug(f"[HTTP] {fmt % args}")
 
-    # Delegation-hijack detection patterns
-    DELEGATION_PATTERNS = (
-        re.compile(r'\[Delegation to ["\']supervisor["\']', re.IGNORECASE),
-        re.compile(r'Agent ["\']supervisor["\'] not found', re.IGNORECASE),
-        re.compile(r'Ensure the agent profile exists', re.IGNORECASE),
-    )
+    def _cors_headers(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Private-Network", "true")
 
-    def __init__(self, omni_key: str, bridge: AnubixROSBridge, poll_interval: float = 3.0):
-        self.client = OmniLinkClient(omni_key=omni_key, timeout=120)
-        self.bridge = bridge
-        self.poll_interval = poll_interval
-        self._mem_len = 0
-        self._last_seen_fingerprint: Optional[str] = None
-        self._running = False
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._cors_headers()
+        self.send_header("Access-Control-Max-Age", "86400")
+        self.end_headers()
 
-    def run(self):
-        """Main loop: poll OmniLink, dispatch commands, send feedback."""
-        self._running = True
-
-        log.info("=" * 70)
-        log.info("  ANUBIX ROS Master Node - OmniLink ↔ ROS 2 Bridge")
-        log.info("=" * 70)
-
-        # Stabilize memory cursor to prevent replaying history
-        log.info("[INIT] Stabilizing OmniLink memory cursor...")
-        self._sync_memory_stable()
-        log.info(f"[READY] Memory at {self._mem_len} msgs, fingerprint locked")
-        log.info("        Agent ready. Fire tasks via OmniLink web UI.")
-        log.info("        Press Ctrl+C to stop.")
-        log.info("-" * 70)
-
-        try:
-            while self._running:
-                try:
-                    self._poll()
-                except OmniLinkAPIError as e:
-                    log.error(f"[API] {e.status_code}: {e.body}")
-                except Exception as e:
-                    log.error(f"[ERROR] {e}", exc_info=True)
-                time.sleep(self.poll_interval)
-        except KeyboardInterrupt:
-            log.info("\n[STOP] Ctrl+C received")
-        finally:
-            self._running = False
-            log.info("[SHUTDOWN] Master node stopped")
-
-    # ── Memory Polling ────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _fingerprint(msg: dict) -> str:
-        """Unique identifier for a memory message."""
-        role = msg.get('role', '')
-        text = ''.join(p.get('text', '') for p in msg.get('parts', []))
-        return f'{role}::{text}'
-
-    def _sync_memory_stable(self, max_attempts: int = 8, delay: float = 0.5):
-        """Stabilize memory cursor to prevent replaying history on startup."""
-        prev_len = -1
-        prev_fp = None
-        for attempt in range(max_attempts):
-            try:
-                memory = self.client.get_memory(self.AGENT_NAME) or []
-            except Exception as e:
-                log.error(f"[MEM] get_memory failed (attempt {attempt+1}): {e}")
-                time.sleep(delay)
-                continue
-
-            cur_len = len(memory)
-            cur_fp = self._fingerprint(memory[-1]) if memory else None
-
-            if cur_len == prev_len and cur_fp == prev_fp:
-                self._mem_len = cur_len
-                self._last_seen_fingerprint = cur_fp
-                return
-
-            prev_len, prev_fp = cur_len, cur_fp
-            time.sleep(delay)
-
-        # Couldn't stabilize, use what we have
-        self._mem_len = prev_len if prev_len >= 0 else 0
-        self._last_seen_fingerprint = prev_fp
-        log.warning(f"[MEM] Cursor not fully stable; locked at {self._mem_len} msgs")
-
-    def _sync_memory(self):
-        """Lightweight cursor refresh after processing."""
-        try:
-            memory = self.client.get_memory(self.AGENT_NAME) or []
-            self._mem_len = len(memory)
-            if memory:
-                self._last_seen_fingerprint = self._fingerprint(memory[-1])
-        except Exception as e:
-            log.error(f"[MEM] sync_memory failed: {e}")
-
-    def _poll(self):
-        """Check for new messages in OmniLink memory."""
-        log.debug("[POLL] Polling OmniLink memory...")
-        try:
-            memory = self.client.get_memory(self.AGENT_NAME)
-        except Exception as e:
-            log.error(f"[POLL] get_memory failed: {e}")
-            return
-
-        if not memory:
-            log.debug("[POLL] Memory is empty")
-            return
-
-        log.debug(f"[POLL] Memory has {len(memory)} messages, cursor at {self._mem_len}")
-
-        # Find start point using fingerprint
-        if self._last_seen_fingerprint is not None:
-            anchor = -1
-            for i in range(len(memory) - 1, -1, -1):
-                if self._fingerprint(memory[i]) == self._last_seen_fingerprint:
-                    anchor = i
-                    break
-
-            if anchor < 0:
-                # Fingerprint not found - memory might have been cleared or reset
-                # Use _mem_len as fallback instead of skipping
-                log.warning("[POLL] Fingerprint not found - using mem_len as fallback")
-                log.warning(f"       Last seen: {self._last_seen_fingerprint[:50]}...")
-                log.warning(f"       Memory length: {len(memory)}, cursor: {self._mem_len}")
-                start = self._mem_len
-            else:
-                start = anchor + 1
+    def do_GET(self):
+        if self.path == "/health":
+            body = json.dumps({"status": "ok", "node": "anubix_master"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self._cors_headers()
+            self.end_headers()
+            self.wfile.write(body)
         else:
-            start = self._mem_len
+            self.send_error(404)
 
-        if start >= len(memory):
-            log.debug(f"[POLL] No new messages (start={start}, len={len(memory)})")
+    def do_POST(self):
+        if self.path != "/tool":
+            self.send_error(404)
             return
 
-        new_messages = memory[start:]
-        self._mem_len = len(memory)
-        self._last_seen_fingerprint = self._fingerprint(memory[-1])
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length).decode("utf-8", errors="replace")
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            data = {}
 
-        log.info(f"[POLL] {len(new_messages)} new message(s) detected")
+        tool_name = str(data.get("tool", "")).strip()
+        tool_kwargs = {k: v for k, v in data.items() if k != "tool"}
 
-        for msg in new_messages:
-            role = msg.get('role', '')
-            if role != 'model':
-                log.debug(f"[POLL] Skipping non-model message (role={role})")
-                continue
+        log.info(f"[TOOL CALLBACK] {tool_name}({tool_kwargs})")
 
-            # Extract text and tool calls
-            text = ''.join(p.get('text', '') for p in msg.get('parts', []))
-            tool_calls = []
-            for part in msg.get('parts', []):
-                if 'tool_use' in part:
-                    tool_calls.append(part['tool_use'])
+        result = self._execute_tool(tool_name, tool_kwargs)
 
-            log.info(f"[POLL] Model message: {len(text)} chars text, {len(tool_calls)} tool calls")
+        log.info(f"[TOOL RESULT] {tool_name} -> {result}")
 
-            # Try tool calls first (preferred method)
-            if tool_calls:
-                log.info(f"[POLL] Processing {len(tool_calls)} tool call(s)")
-                cmds = self._parse_tool_calls(tool_calls)
+        body = json.dumps({"status": "ok", "tool": tool_name, "result": result}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self._cors_headers()
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _execute_tool(self, tool_name: str, kwargs: dict) -> dict:
+        """Map OmniLink tool call to ROS bridge execution."""
+        bridge = self.__class__.bridge
+        if bridge is None:
+            return {"error": "ROS bridge not initialized"}
+
+        try:
+            if tool_name == "supervisor_robot_id":
+                fb = bridge.execute('robot_id', robot_id=str(kwargs.get('robot_id', '')))
+                return {"feedback": fb, "message": f"Robot ID set to {kwargs.get('robot_id')}"}
+
+            elif tool_name == "supervisor_task_id":
+                fb = bridge.execute('task_id', task_id=str(kwargs.get('task_id', '')))
+                return {"feedback": fb, "message": f"Task ID set to {kwargs.get('task_id')}"}
+
+            elif tool_name == "supervisor_nav_vision":
+                vision = bool(kwargs.get('vision', False))
+                fb = bridge.execute('nav_vision', vision=vision)
+                return {"feedback": fb, "message": f"Nav vision set to {vision}"}
+
+            elif tool_name == "supervisor_nav_goal":
+                x = float(kwargs.get('x', 0))
+                y = float(kwargs.get('y', 0))
+                fb = bridge.execute('nav_goal', x=x, y=y)
+                return {"feedback": fb, "message": f"Navigation to ({x}, {y}) complete"}
+
+            elif tool_name == "supervisor_nav_goal_home":
+                fb = bridge.execute('nav_goal_home')
+                return {"feedback": fb, "message": "Navigation to home complete"}
+
+            elif tool_name == "supervisor_target_camera":
+                cam = int(kwargs.get('camera_number', 1))
+                fb = bridge.execute('target_camera', camera_number=cam)
+                return {"feedback": fb, "message": f"Camera {cam} selected"}
+
+            elif tool_name == "supervisor_perception_goal":
+                task_type = str(kwargs.get('task_type', 'disease')).lower()
+                fb = bridge.execute('perception_goal', task_type=task_type)
+                return {"feedback": fb, "message": f"Perception ({task_type}) complete"}
+
+            elif tool_name == "supervisor_arm_nav_goal":
+                signal = str(kwargs.get('signal', 'move')).lower()
+                fb = bridge.execute('arm_nav_goal', signal=signal)
+                return {"feedback": fb, "message": f"Arm nav ({signal}) complete"}
+
+            elif tool_name == "supervisor_grip":
+                action = bool(kwargs.get('action', False))
+                fb = bridge.execute('grip', action=action)
+                return {"feedback": fb, "message": f"Gripper {'close' if action else 'open'} complete"}
+
+            elif tool_name == "supervisor_spectral_target":
+                task_type = str(kwargs.get('task_type', 'disease')).lower()
+                robot_id = str(kwargs.get('robot_id', ''))
+                task_id = str(kwargs.get('task_id', ''))
+                fb = bridge.execute('spectral_target',
+                                    task_type=task_type,
+                                    robot_id=robot_id,
+                                    task_id=task_id)
+                return {"feedback": fb, "message": f"Spectral scan ({task_type}) complete"}
+
+            elif tool_name == "supervisor_force_stop":
+                fb = bridge.execute('force_stop')
+                return {"feedback": fb, "message": "Emergency stop executed"}
+
             else:
-                # Fallback to text parsing (old method)
-                log.debug(f"[POLL] No tool calls, parsing text...")
-                cmds = parse_commands(text)
+                log.warning(f"[TOOL] Unknown tool: {tool_name}")
+                return {"error": f"Unknown tool: {tool_name}"}
 
-            log.info(f"[POLL] Parsed {len(cmds)} command(s)")
+        except Exception as e:
+            log.error(f"[TOOL] Exception executing {tool_name}: {e}")
+            return {"error": str(e)}
 
-            # Delegation hijack recovery (only for text-based)
-            if not cmds and not tool_calls and self._is_delegation_hijack(text):
-                log.warning("[POLL] Delegation hijack detected - recovering...")
-                recovered = self._recover_from_delegation()
-                if recovered:
-                    text = recovered
-                    cmds = parse_commands(text)
 
-            if not cmds:
-                log.warning("[POLL] No commands found!")
-                if text:
-                    log.warning(f"[POLL] Agent text: {text[:300]}")
-                continue
+# ─────────────────────────────────────────────────────────────────────────────
+# Profile Management
+# ─────────────────────────────────────────────────────────────────────────────
 
-            if text and tool_calls:
-                self._print_agent(f"TOOL CALLS: {len(tool_calls)}")
-            elif text:
-                self._print_agent(text)
-
-            # NEW ARCHITECTURE: Execute commands sequentially
-            if len(cmds) > 1:
-                log.warning(f"[POLL] Agent emitted {len(cmds)} commands - expected 1 per response!")
-
-            feedback = self._dispatch(cmds)
-            if feedback:
-                self._execution_loop(feedback)
-
-            self._sync_memory()
-            return  # Process one batch per poll tick
-
-    # ── Tool Call Parsing ─────────────────────────────────────────────────────
-
-    def _parse_tool_calls(self, tool_calls: list) -> list:
-        """
-        Parse tool calls from agent response and convert to command tuples.
-
-        Tool call format from OmniLink:
-        {
-            'name': 'supervisor_nav_goal',
-            'input': {'x': 40.0, 'y': 45.0}
+SUPERVISOR_TOOLS = [
+    {
+        "name": "supervisor_robot_id",
+        "description": "Set the robot context ID for tracking",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "robot_id": {
+                    "type": "string",
+                    "description": "UUID or identifier for the robot instance"
+                }
+            },
+            "required": ["robot_id"]
         }
+    },
+    {
+        "name": "supervisor_task_id",
+        "description": "Set the task context ID for tracking",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "UUID or identifier for the specific task"
+                }
+            },
+            "required": ["task_id"]
+        }
+    },
+    {
+        "name": "supervisor_nav_vision",
+        "description": "Set navigation vision mode (true=stop 1m before target for camera, false=drive all the way)",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "vision": {
+                    "type": "boolean",
+                    "description": "Enable vision mode (stop before target)"
+                }
+            },
+            "required": ["vision"]
+        }
+    },
+    {
+        "name": "supervisor_nav_goal",
+        "description": "Navigate robot to specific coordinates. Returns /nav/status: point_reached|blocked|failure",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "x": {"type": "number", "description": "X coordinate in meters"},
+                "y": {"type": "number", "description": "Y coordinate in meters"}
+            },
+            "required": ["x", "y"]
+        }
+    },
+    {
+        "name": "supervisor_nav_goal_home",
+        "description": "Return robot to home position (0, 0). Returns /nav/status",
+        "parameters": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "supervisor_target_camera",
+        "description": "Select camera for perception (1=wide-angle, 2=telephoto)",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "camera_number": {
+                    "type": "integer",
+                    "description": "Camera number (1 or 2)",
+                    "enum": [1, 2]
+                }
+            },
+            "required": ["camera_number"]
+        }
+    },
+    {
+        "name": "supervisor_perception_goal",
+        "description": "Start perception task. Returns /perception/status: found|not_found",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_type": {
+                    "type": "string",
+                    "description": "Type of perception task",
+                    "enum": ["disease", "water_stress", "harvest_status"]
+                }
+            },
+            "required": ["task_type"]
+        }
+    },
+    {
+        "name": "supervisor_arm_nav_goal",
+        "description": "Move robotic arm to target or home position. Returns /arm/arm_status: success|block|mechanical_error",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "signal": {
+                    "type": "string",
+                    "description": "move=go to target pose, home=return to safe position",
+                    "enum": ["move", "home"]
+                }
+            },
+            "required": ["signal"]
+        }
+    },
+    {
+        "name": "supervisor_grip",
+        "description": "Control gripper. Returns /arm/gripper_status and /arm/touch_status",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "boolean",
+                    "description": "true=close gripper, false=open gripper"
+                }
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "supervisor_spectral_target",
+        "description": "Run spectrometer scan on target. Returns /spectrometer/status: success|failure",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_type": {
+                    "type": "string",
+                    "description": "Type of spectral analysis",
+                    "enum": ["disease", "water_stress", "harvest_status"]
+                },
+                "robot_id": {
+                    "type": "string",
+                    "description": "Robot ID (optional, uses context if not provided)"
+                },
+                "task_id": {
+                    "type": "string",
+                    "description": "Task ID (optional, uses context if not provided)"
+                }
+            },
+            "required": ["task_type"]
+        }
+    },
+    {
+        "name": "supervisor_force_stop",
+        "description": "Emergency stop - halts all robot operations immediately",
+        "parameters": {"type": "object", "properties": {}}
+    },
+]
 
-        Returns: List of (cmd_type, FakeMatch) tuples compatible with _execute_one()
-        """
-        import re
 
-        class FakeMatch:
-            """Fake regex match object to work with existing _execute_one() code."""
-            def __init__(self, groups):
-                self.groups_list = groups
-                self.lastindex = len(groups) - 1 if groups else 0
+def ensure_profile(client: OmniLinkClient, tool_callback_url: str, agent_prompt: str):
+    """Create or update the ANUBIX agent profile with toolCallbackUrl."""
+    settings = {
+        "agentName": "ANUBIX",
+        "mainTask": agent_prompt,
+        "agentPersonality": "Professional",
+        "allowToolUse": True,
+        "availableTools": ",".join(t["name"] for t in SUPERVISOR_TOOLS),
+        "availableToolDetails": SUPERVISOR_TOOLS,
+        "toolCallbackUrl": tool_callback_url,
+        "maxToolRounds": 15,
+    }
 
-            def group(self, idx):
-                if idx == 0:
-                    return f"<tool_call:{self.groups_list}>"
-                if idx <= len(self.groups_list):
-                    return self.groups_list[idx - 1]
-                return ''
+    try:
+        profiles = client.list_profiles()
+        existing = next((p for p in profiles if p.get('name') == 'ANUBIX'), None)
 
-        results = []
+        if existing:
+            profile_id = existing['id']
+            client.update_profile(profile_id, settings=settings)
+            log.info(f"[PROFILE] Updated ANUBIX profile (ID: {profile_id})")
+            log.info(f"[PROFILE] toolCallbackUrl = {tool_callback_url}")
+        else:
+            result = client.create_profile(name="ANUBIX", settings=settings)
+            profile_id = result['id']
+            log.info(f"[PROFILE] Created ANUBIX profile (ID: {profile_id})")
+            log.info(f"[PROFILE] toolCallbackUrl = {tool_callback_url}")
 
-        for tc in tool_calls:
-            name = tc.get('name', '')
-            input_params = tc.get('input', {})
+    except Exception as e:
+        log.error(f"[PROFILE] Failed to set profile: {e}")
+        log.error("[PROFILE] Tool callbacks will not work without a valid profile!")
+        raise
 
-            log.info(f"[TOOL] {name}({input_params})")
 
-            # Map tool names to command types
-            if name == 'supervisor_robot_id':
-                results.append(('robot_id', FakeMatch([input_params.get('robot_id', '')])))
+def load_agent_prompt() -> str:
+    """Load agent prompt from file, or use embedded default."""
+    search_paths = [
+        os.path.join(os.path.dirname(__file__), '..', '..', '..', 'agent_config', 'ANUBIX_AGENT_PROMPT_v3_TOOLCALLS.txt'),
+        os.path.join(os.path.dirname(__file__), '..', 'agent_config', 'ANUBIX_AGENT_PROMPT_v3_TOOLCALLS.txt'),
+        'ANUBIX_AGENT_PROMPT_v3_TOOLCALLS.txt',
+    ]
 
-            elif name == 'supervisor_task_id':
-                results.append(('task_id', FakeMatch([input_params.get('task_id', '')])))
+    for path in search_paths:
+        abs_path = os.path.abspath(path)
+        if os.path.exists(abs_path):
+            with open(abs_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            log.info(f"[PROMPT] Loaded from {abs_path} ({len(content)} bytes)")
+            return content
 
-            elif name == 'supervisor_nav_vision':
-                vision_str = 'true' if input_params.get('vision') else 'false'
-                results.append(('nav_vision', FakeMatch([vision_str])))
-
-            elif name == 'supervisor_nav_goal':
-                x = str(input_params.get('x', 0))
-                y = str(input_params.get('y', 0))
-                results.append(('nav_goal', FakeMatch([x, y])))
-
-            elif name == 'supervisor_nav_goal_home':
-                results.append(('nav_goal_home', FakeMatch([])))
-
-            elif name == 'supervisor_target_camera':
-                cam = str(input_params.get('camera_number', 1))
-                results.append(('target_camera', FakeMatch([cam])))
-
-            elif name == 'supervisor_perception_goal':
-                task = input_params.get('task_type', 'disease').lower()
-                results.append(('perception_goal', FakeMatch([task])))
-
-            elif name == 'supervisor_arm_nav_goal':
-                signal = input_params.get('signal', 'move').lower()
-                results.append(('arm_nav_goal', FakeMatch([signal])))
-
-            elif name == 'supervisor_grip':
-                action_str = 'true' if input_params.get('action') else 'false'
-                results.append(('grip', FakeMatch([action_str])))
-
-            elif name == 'supervisor_spectral_target':
-                task = input_params.get('task_type', 'disease').lower()
-                rid = input_params.get('robot_id', '')
-                tid = input_params.get('task_id', '')
-                results.append(('spectral_target', FakeMatch([task, rid, tid])))
-
-            elif name == 'supervisor_force_stop':
-                results.append(('force_stop', FakeMatch([])))
-
-            else:
-                log.warning(f"[TOOL] Unknown tool: {name}")
-
-        return results
-
-    # ── Delegation Hijack Recovery ────────────────────────────────────────────
-
-    def _is_delegation_hijack(self, text: str) -> bool:
-        return any(p.search(text) for p in self.DELEGATION_PATTERNS)
-
-    def _recover_from_delegation(self, max_attempts: int = 2) -> Optional[str]:
-        """Re-prompt agent to emit plain-text commands."""
-        prompts = [
-            "SYSTEM NOTE: your previous response was intercepted by the delegation "
-            "pipeline because it parsed `supervisor/` as an agent name. There is no "
-            "agent called 'supervisor' – it is a literal command prefix. Re-emit the "
-            "same command as PLAIN TEXT, exactly as written in your custom instructions. "
-            "Do not delegate. Do not call tools.",
-            "Please respond with the supervisor/* command for the current step as "
-            "plain text. No tool calls, no delegation.",
-        ]
-
-        for i in range(max_attempts):
-            prompt = prompts[min(i, len(prompts) - 1)]
-            try:
-                resp = self.client.chat(
-                    prompt=prompt,
-                    agent_name=self.AGENT_NAME,
-                    engine=self.ENGINE,
-                )
-            except OmniLinkAPIError as e:
-                log.error(f"[RECOVER] {e.status_code}: {e.body}")
-                return None
-
-            text = resp.get('text', '') or ''
-            if self._is_delegation_hijack(text):
-                log.warning(f"[RECOVER] Attempt {i+1} still hijacked")
-                continue
-
-            if parse_commands(text):
-                log.info(f"[RECOVER] Attempt {i+1} returned valid commands")
-                return text
-
-        log.error("[RECOVER] All attempts failed")
-        return None
-
-    # ── Execution Loop ────────────────────────────────────────────────────────
-
-    def _execution_loop(self, initial_feedback: str):
-        """
-        Send feedback to agent, wait for next command, execute it, repeat.
-        This loop implements the sequential one-command-at-a-time architecture.
-        """
-        feedback = initial_feedback
-        loop_iter = 0
-
-        while feedback and self._running:
-            loop_iter += 1
-            log.info(f"\n{'─'*60}")
-            log.info(f"[FEEDBACK → AGENT] (iteration {loop_iter})")
-            log.info(f"{feedback}")
-            log.info(f"{'─'*60}")
-
-            try:
-                resp = self.client.chat(
-                    prompt=feedback,
-                    agent_name=self.AGENT_NAME,
-                    engine=self.ENGINE,
-                )
-            except OmniLinkAPIError as e:
-                log.error(f"[CHAT] {e.status_code}: {e.body}")
-                break
-            except Exception as e:
-                log.error(f"[CHAT] {e}", exc_info=True)
-                break
-
-            agent_text = resp.get('text', '')
-
-            # Delegation hijack recovery
-            if not parse_commands(agent_text) and self._is_delegation_hijack(agent_text):
-                log.warning("[LOOP] Mid-loop delegation hijack - recovering...")
-                recovered = self._recover_from_delegation()
-                if recovered:
-                    agent_text = recovered
-
-            self._print_agent(agent_text)
-
-            # Force stop check
-            if re.search(r'supervisor/force_stop', agent_text, re.IGNORECASE):
-                log.warning("[EMERGENCY] force_stop detected!")
-                self.bridge.execute('force_stop')
-                break
-
-            cmds = parse_commands(agent_text)
-            if not cmds:
-                log.info("[DONE] No more commands - mission complete")
-                break
-
-            if len(cmds) > 1:
-                log.warning(f"[LOOP] Agent emitted {len(cmds)} commands - expected 1!")
-
-            feedback = self._dispatch(cmds)
-            if not feedback:
-                log.warning("[LOOP] No feedback - yielding to poll")
-                break
-
-    # ── Dispatch ──────────────────────────────────────────────────────────────
-
-    def _dispatch(self, cmds: list) -> str:
-        """
-        Execute commands in PARSE ORDER (not priority order).
-        Sequential architecture: agent emits ONE command, gets confirmation, emits next.
-        """
-        feedbacks = []
-
-        for cmd_type, match in cmds:
-            log.info(f"[CMD] ► {match.group(0)}")
-            fb = self._execute_one(cmd_type, match)
-            if fb:
-                log.info(f"[FB]  ◄ {fb.replace(chr(10), ' | ')}")
-                feedbacks.append(fb)
-            else:
-                log.warning(f"[FB]  ◄ (no feedback)")
-
-            if cmd_type == 'force_stop':
-                break
-
-        return '\n'.join(feedbacks)
-
-    def _execute_one(self, cmd_type: str, match: re.Match) -> Optional[str]:
-        """Execute a single command via the ROS bridge."""
-        if cmd_type == 'force_stop':
-            return self.bridge.execute('force_stop')
-
-        if cmd_type == 'robot_id':
-            return self.bridge.execute('robot_id', robot_id=match.group(1))
-
-        if cmd_type == 'task_id':
-            return self.bridge.execute('task_id', task_id=match.group(1))
-
-        if cmd_type == 'nav_vision':
-            vision = match.group(1).lower() == 'true'
-            return self.bridge.execute('nav_vision', vision=vision)
-
-        if cmd_type == 'nav_goal':
-            return self.bridge.execute('nav_goal',
-                                      x=float(match.group(1)),
-                                      y=float(match.group(2)))
-
-        if cmd_type == 'nav_goal_home':
-            return self.bridge.execute('nav_goal_home')
-
-        if cmd_type == 'target_camera':
-            return self.bridge.execute('target_camera',
-                                      camera_number=int(match.group(1)))
-
-        if cmd_type == 'perception_goal':
-            return self.bridge.execute('perception_goal',
-                                      task_type=match.group(1).lower())
-
-        if cmd_type == 'arm_nav_goal':
-            return self.bridge.execute('arm_nav_goal',
-                                      signal=match.group(1).lower())
-
-        if cmd_type == 'grip':
-            action = match.group(1).lower() == 'true'
-            return self.bridge.execute('grip', action=action)
-
-        if cmd_type == 'spectral_target':
-            robot_id = (match.group(2) or '') if match.lastindex and match.lastindex >= 2 else ''
-            task_id = (match.group(3) or '') if match.lastindex and match.lastindex >= 3 else ''
-            return self.bridge.execute('spectral_target',
-                                      task_type=match.group(1).lower(),
-                                      robot_id=robot_id,
-                                      task_id=task_id)
-
-        log.error(f"[DISPATCH] Unknown command type: {cmd_type}")
-        return None
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _print_agent(text: str):
-        log.info(f"\n{'═'*60}")
-        log.info("  ANUBIX AGENT")
-        log.info(f"{'═'*60}")
-        for line in text.splitlines():
-            log.info(f"  {line}")
-        log.info("═" * 60)
+    log.warning("[PROMPT] No prompt file found, using embedded default")
+    return (
+        "You are Anubix, an autonomous agritech robot executing precision agricultural tasks.\n"
+        "Your primary duties: measure water stress, detect diseases, check harvest status.\n\n"
+        "CRITICAL: Emit ONE tool call per response. Wait for confirmation before the next.\n"
+        "Follow the 11-step execution sequence exactly. Do not skip steps.\n"
+        "Do not add explanatory text - only use tool calls.\n"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -940,20 +767,23 @@ class AnubixOmniLinkMaster:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def parse_args():
-    p = argparse.ArgumentParser(description="ANUBIX ROS Master Node")
-    p.add_argument('--poll', type=float, default=3.0,
-                   help="OmniLink poll interval (default 3.0s)")
+    p = argparse.ArgumentParser(description="ANUBIX ROS Master Node (Tool Callback Architecture)")
+    p.add_argument('--port', type=int, default=5055,
+                   help="Tool callback HTTP server port (default 5055)")
+    p.add_argument('--host', type=str, default='0.0.0.0',
+                   help="Tool callback HTTP server bind address (default 0.0.0.0)")
+    p.add_argument('--callback-url', type=str, default='',
+                   help="Override toolCallbackUrl (default: http://127.0.0.1:<port>/tool)")
     p.add_argument('--feedback-timeout', type=float, default=120.0,
                    help="ROS feedback timeout (default 120s)")
     p.add_argument('--arm-home', type=float, nargs=3, default=[0.0, 0.0, 0.3],
                    metavar=('X', 'Y', 'Z'), help="Arm home pose")
     p.add_argument('--robot-id', type=str, default='',
-                   help="Default robot ID (can be overridden by commands)")
+                   help="Default robot ID")
     p.add_argument('--task-id', type=str, default='',
-                   help="Default task ID (can be overridden by commands)")
+                   help="Default task ID")
     p.add_argument('--verbose', action='store_true',
                    help="Enable debug logging")
-    # Use parse_known_args to allow ROS 2 to pass through unknown arguments
     args, unknown = p.parse_known_args()
     if unknown:
         log.debug(f"Ignoring unknown arguments (ROS 2 remappings): {unknown}")
@@ -962,64 +792,92 @@ def parse_args():
 
 def main():
     print("=" * 70)
-    print("  ANUBIX ROS MASTER NODE V3 - STARTING")
+    print("  ANUBIX ROS MASTER NODE - Tool Callback Architecture")
     print("=" * 70)
 
     args = parse_args()
-    print(f"Arguments parsed: poll={args.poll}, feedback_timeout={args.feedback_timeout}")
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
-        print("Verbose logging enabled")
 
     omni_key = os.environ.get('OMNI_KEY', '').strip()
     if not omni_key:
         print("ERROR: OMNI_KEY not set. Export OMNI_KEY=olink_YOUR_KEY")
         sys.exit(1)
 
-    print(f"OMNI_KEY found: {omni_key[:15]}...")
-    print("Initializing ROS 2...")
+    print(f"  OMNI_KEY: {omni_key[:15]}...")
+    print(f"  Port: {args.port}")
+    print(f"  Host: {args.host}")
+
+    # Determine tool callback URL
+    tool_callback_url = args.callback_url or f"http://127.0.0.1:{args.port}/tool"
+    print(f"  toolCallbackUrl: {tool_callback_url}")
 
     # Initialize ROS 2
+    print("  Initializing ROS 2...")
     rclpy.init()
-    print("ROS 2 initialized")
 
-    # Create ROS bridge node
-    print("Creating ROS bridge node...")
     bridge = AnubixROSBridge(
         feedback_timeout=args.feedback_timeout,
         arm_home_pose=tuple(args.arm_home),
         robot_id=args.robot_id,
         task_id=args.task_id,
     )
-    print("ROS bridge node created")
 
-    # Start executor in background thread
-    print("Starting ROS executor thread...")
+    # Start ROS executor in background thread
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(bridge)
-
     exec_thread = threading.Thread(target=executor.spin, daemon=True)
     exec_thread.start()
-    print("ROS executor thread started")
-
-    # Allow QoS handshakes to settle
-    print("Waiting for QoS handshakes...")
     time.sleep(0.5)
-    print("QoS handshakes complete")
+    print("  ROS 2 initialized and spinning")
+
+    # Set the bridge reference on the handler class
+    ToolCallbackHandler.bridge = bridge
+
+    # Start HTTP tool callback server
+    server = http.server.ThreadingHTTPServer(
+        (args.host, args.port), ToolCallbackHandler
+    )
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    print(f"  Tool callback server listening on {args.host}:{args.port}")
+
+    # Update agent profile with toolCallbackUrl
+    print("  Updating ANUBIX agent profile...")
+    client = OmniLinkClient(omni_key=omni_key, timeout=30)
+    agent_prompt = load_agent_prompt()
 
     try:
-        # Run OmniLink master
-        print("Creating OmniLink master...")
-        master = AnubixOmniLinkMaster(
-            omni_key=omni_key,
-            bridge=bridge,
-            poll_interval=args.poll,
-        )
-        print("Starting OmniLink master run loop...")
-        master.run()
+        ensure_profile(client, tool_callback_url, agent_prompt)
+    except Exception as e:
+        log.error(f"Failed to configure profile: {e}")
+        log.error("Continuing anyway - profile may need manual configuration")
+
+    print()
+    print("=" * 70)
+    print("  ANUBIX READY")
+    print("=" * 70)
+    print()
+    print(f"  Tool callback URL: {tool_callback_url}")
+    print(f"  How it works:")
+    print(f"    1. Open OmniLink web UI: https://www.omnilink-agents.com")
+    print(f"    2. Select 'ANUBIX' agent")
+    print(f"    3. Send a task (e.g. 'Check disease at 40,45 with robot_id=abc task_id=def')")
+    print(f"    4. The AI will emit tool calls -> web UI POSTs them here -> we execute via ROS")
+    print(f"    5. Results flow back to AI automatically")
+    print()
+    print(f"  Press Ctrl+C to stop.")
+    print("-" * 70)
+
+    try:
+        while True:
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        print("\n[STOP] Ctrl+C received")
     finally:
         log.info("[SHUTDOWN] Cleaning up...")
+        server.shutdown()
         bridge.destroy_node()
         executor.shutdown()
         rclpy.shutdown()

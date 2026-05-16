@@ -29,7 +29,8 @@ except ImportError:
 
 def load_agent_prompt():
     """Load the ANUBIX agent prompt from file."""
-    prompt_path = r"ANUBIX_AGENT_PROMPT_v3_TOOLCALLS.txt"
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    prompt_path = os.path.join(script_dir, "ANUBIX_AGENT_PROMPT_v3_TOOLCALLS.txt")
 
     with open(prompt_path, 'r', encoding='utf-8') as f:
         content = f.read()
@@ -218,14 +219,20 @@ def configure_agent(api_key, agent_prompt):
     ]
 
     # Agent settings with tool use enabled
+    # toolCallbackUrl: The master node runs an HTTP server on port 5055.
+    # The OmniLink web UI frontend will POST tool calls to this URL.
+    # If running on a remote machine, change to the machine's IP/hostname.
+    tool_callback_url = os.environ.get("ANUBIX_CALLBACK_URL", "http://127.0.0.1:5055/tool")
+
     agent_settings = {
         "agentName": "ANUBIX",
         "mainTask": agent_prompt,
         "agentPersonality": "Professional",
-        "allowToolUse": True,  # CRITICAL: Enable tool use for tool-based architecture
-        "availableCommands": "",
+        "allowToolUse": True,
         "availableTools": ",".join([t["name"] for t in supervisor_tools]),
         "availableToolDetails": supervisor_tools,
+        "toolCallbackUrl": tool_callback_url,
+        "maxToolRounds": 15,
     }
 
     # Create or update profile
@@ -282,17 +289,21 @@ def main():
     print()
     print(f"Agent Name: ANUBIX")
     print(f"Profile ID: {profile_id}")
+    print(f"toolCallbackUrl: {tool_callback_url}")
     print(f"Status: Ready for deployment")
     print()
-    print("Home positions configured in ROS param files:")
-    print("  - Navigation home: src/anubix_navigation/config/nav_params.yaml")
-    print("  - Arm home: src/anubix_arm/config/arm_params.yaml")
-    print()
     print("Next steps:")
-    print("1. Open OmniLink web UI: https://www.omnilink-agents.com")
-    print("2. Select 'ANUBIX' from agent dropdown")
-    print("3. Send test task: 'Check water stress at (3, 5) with robot_id xxx and task_id yyy'")
-    print("4. Verify 11-step execution completes successfully")
+    print("1. Start the master node: ros2 run anubix_master master_node")
+    print("   (This runs the HTTP tool callback server on port 5055)")
+    print("2. Open OmniLink web UI: https://www.omnilink-agents.com")
+    print("3. Select 'ANUBIX' from agent dropdown")
+    print("4. Send test task: 'Check water stress at (3, 5) with robot_id xxx and task_id yyy'")
+    print("5. The web UI will automatically POST tool calls to your master node")
+    print()
+    print("IMPORTANT: The toolCallbackUrl must be reachable from YOUR BROWSER.")
+    print("If the master node runs on a remote machine (Jetson), you need either:")
+    print("  - SSH port forwarding: ssh -L 5055:localhost:5055 jetson")
+    print("  - Or set ANUBIX_CALLBACK_URL to the Jetson's LAN IP")
     print()
 
 
