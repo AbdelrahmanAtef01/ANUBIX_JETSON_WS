@@ -133,9 +133,9 @@ def configure_agent(api_key, agent_prompt):
                 "type": "object",
                 "properties": {
                     "camera_number": {
-                        "type": "integer",
-                        "description": "Camera number (1 or 2)",
-                        "enum": [1, 2]
+                        "type": "string",
+                        "description": "Camera number: '1'=wide-angle, '2'=telephoto",
+                        "enum": ["1", "2"]
                     }
                 },
                 "required": ["camera_number"]
