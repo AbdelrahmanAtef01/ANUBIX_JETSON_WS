@@ -148,6 +148,52 @@ ros2 launch anubix_bringup jetson.launch.py
 
 ---
 
+## Phase 1.5: Laptop → Jetson SSH Port Forward (required for OmniLink)
+
+The master node on the Jetson runs an HTTP tool-callback server on **port
+5055**. OmniLink's web UI is loaded in the **laptop's browser**, and its
+CSP only allows requests to `localhost/*`. To bridge the two, open a
+single SSH tunnel from the laptop that forwards `localhost:5055` →
+`jetson:5055`.
+
+### On the LAPTOP (Windows / macOS / Linux — wherever the browser runs)
+
+Open a new terminal **on the laptop** (not on the Jetson, not on the RPi):
+
+```bash
+# Replace 192.168.1.10 with your Jetson's LAN IP if different.
+ssh -L 5055:localhost:5055 anubix@192.168.1.10
+```
+
+**Leave that shell open for the entire session.** Closing it tears down
+the tunnel and OmniLink tool calls will start failing with
+`ERR_CONNECTION_REFUSED`.
+
+> 💡 If you frequently SSH to the Jetson and don't want to type the
+> command every time, add the following to `~/.ssh/config` on the
+> laptop:
+> ```
+> Host anubix-jetson
+>     HostName 192.168.1.10
+>     User anubix
+>     LocalForward 5055 localhost:5055
+> ```
+> Then just `ssh anubix-jetson`.
+
+### Verify the tunnel is live
+
+```bash
+# On the laptop — should return JSON / 200 / 405 from the master HTTP server.
+curl -i http://localhost:5055/tool
+```
+
+If you get `curl: (7) Failed to connect` the tunnel is not up; if you
+get `Connection refused` from the remote side the master is not
+running on the Jetson yet — go back to Terminal 2 and check it
+started cleanly.
+
+---
+
 ## Phase 2: Connectivity Tests
 
 Open **Terminal 3 on Jetson** (or RPi, doesn't matter — topics are shared):
@@ -222,6 +268,12 @@ sending the goal.
 The nav node also subscribes to `/supervisor/robot_id` and
 `/supervisor/task_id` (both latched) so the navigation stack always
 has the current mission context available for use during navigation.
+
+> 📝 The real navigation rollout must also POST the robot's live
+> location to the Supabase `update-location` edge function every 2 s.
+> That feature is NOT in the simulated stack — see
+> `REAL_NAVIGATION_STACK.md` (kept with the project notes outside the
+> repos) for the spec the implementer must satisfy.
 
 ```bash
 # 1a. (Optional) Tell nav to stop short of the goal so the camera can
@@ -817,3 +869,17 @@ The install script handles this automatically.
 ✅ **OmniLink**: Master sends feedback, AI responds with next command, full mission completes  
 
 **If all these pass → ANUBIX is fully operational 🚀**
+
+---
+
+## Going from SIMULATE to HARDWARE
+
+The default mode for every stack is `simulate: true` (set in each
+package's `config/*.yaml`). To run any stack against real hardware,
+follow the dedicated guides kept alongside the project (one level above
+this workspace, NOT inside either git repo):
+
+- `REAL_ARM_STACK.md` — wiring up the real arm + gripper (Jetson)
+- `REAL_NAVIGATION_STACK.md` — wiring up the real Pi-driven nav base,
+  including the 2 Hz Supabase location uploader the implementer must
+  add
