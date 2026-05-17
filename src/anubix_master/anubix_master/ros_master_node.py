@@ -854,18 +854,9 @@ def main():
     print(f"  Host: {args.host}")
 
     # Determine tool callback URL
-    if args.callback_url:
-        tool_callback_url = args.callback_url
-    else:
-        print("  Starting ngrok tunnel...")
-        try:
-            ngrok_base = _start_ngrok(args.port)
-            tool_callback_url = f"{ngrok_base}/tool"
-        except RuntimeError as e:
-            print(f"  WARNING: {e}")
-            print("  Falling back to local IP (remote browsers may not work)")
-            local_ip = _get_wifi_ip()
-            tool_callback_url = f"http://{local_ip}:{args.port}/tool"
+    # OmniLink's CSP only allows localhost/* — use SSH port forwarding from the
+    # remote device: ssh -L 5055:localhost:5055 user@<jetson-ip>
+    tool_callback_url = args.callback_url or f"http://localhost:{args.port}/tool"
     print(f"  toolCallbackUrl: {tool_callback_url}")
 
     # Initialize ROS 2
