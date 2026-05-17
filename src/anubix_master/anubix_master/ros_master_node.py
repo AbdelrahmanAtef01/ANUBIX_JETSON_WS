@@ -714,7 +714,7 @@ def ensure_profile(client: OmniLinkClient, tool_callback_url: str, agent_prompt:
         "availableTools": ",".join(t["name"] for t in SUPERVISOR_TOOLS),
         "availableToolDetails": SUPERVISOR_TOOLS,
         "toolCallbackUrl": tool_callback_url,
-        "maxToolRounds": 15,
+        "maxToolRounds": 1000,
     }
 
     try:

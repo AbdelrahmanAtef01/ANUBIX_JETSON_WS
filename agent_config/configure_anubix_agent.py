@@ -232,7 +232,7 @@ def configure_agent(api_key, agent_prompt):
         "availableTools": ",".join([t["name"] for t in supervisor_tools]),
         "availableToolDetails": supervisor_tools,
         "toolCallbackUrl": tool_callback_url,
-        "maxToolRounds": 15,
+        "maxToolRounds": 1000,
     }
 
     # Create or update profile
@@ -287,6 +287,7 @@ def main():
     print("CONFIGURATION COMPLETE")
     print("=" * 70)
     print()
+    tool_callback_url = os.environ.get("ANUBIX_CALLBACK_URL", "http://127.0.0.1:5055/tool")
     print(f"Agent Name: ANUBIX")
     print(f"Profile ID: {profile_id}")
     print(f"toolCallbackUrl: {tool_callback_url}")
