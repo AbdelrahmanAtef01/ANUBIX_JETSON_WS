@@ -219,10 +219,23 @@ def configure_agent(api_key, agent_prompt):
     ]
 
     # Agent settings with tool use enabled
-    # toolCallbackUrl: The master node runs an HTTP server on port 5055.
-    # The OmniLink web UI frontend will POST tool calls to this URL.
-    # If running on a remote machine, change to the machine's IP/hostname.
-    tool_callback_url = os.environ.get("ANUBIX_CALLBACK_URL", "http://127.0.0.1:5055/tool")
+    # toolCallbackUrl: per OmniLink Remote Agent Access §3, the browser must be
+    # able to fetch this URL — meaning it must be loopback OR a trusted-cert
+    # https:// URL. For an operator on a different network than the agent host,
+    # the documented answer is §5.1 Option E: an HTTPS tunnel like Cloudflare
+    # Tunnel quick mode. The master node (ros_master_node.py) starts that tunnel
+    # automatically and re-registers the live URL on every run — so normally you
+    # don't need this script at all.
+    #
+    # This script is useful for one-off profile re-registration when you already
+    # know the URL (e.g. a stable named Cloudflare tunnel, or an SSH-forward
+    # setup pointing at localhost). Set ANUBIX_TOOL_CALLBACK_URL accordingly.
+    tool_callback_url = os.environ.get(
+        "ANUBIX_TOOL_CALLBACK_URL",
+        os.environ.get("ANUBIX_CALLBACK_URL", "http://127.0.0.1:5055/tool"),
+    )
+    if not tool_callback_url.rstrip("/").endswith("/tool"):
+        tool_callback_url = tool_callback_url.rstrip("/") + "/tool"
 
     agent_settings = {
         "agentName": "ANUBIX",
@@ -287,24 +300,29 @@ def main():
     print("CONFIGURATION COMPLETE")
     print("=" * 70)
     print()
-    tool_callback_url = os.environ.get("ANUBIX_CALLBACK_URL", "http://127.0.0.1:5055/tool")
+    tool_callback_url = os.environ.get(
+        "ANUBIX_TOOL_CALLBACK_URL",
+        os.environ.get("ANUBIX_CALLBACK_URL", "http://127.0.0.1:5055/tool"),
+    )
     print(f"Agent Name: ANUBIX")
     print(f"Profile ID: {profile_id}")
     print(f"toolCallbackUrl: {tool_callback_url}")
     print(f"Status: Ready for deployment")
     print()
-    print("Next steps:")
-    print("1. Start the master node: ros2 run anubix_master master_node")
-    print("   (This runs the HTTP tool callback server on port 5055)")
-    print("2. Open OmniLink web UI: https://www.omnilink-agents.com")
-    print("3. Select 'ANUBIX' from agent dropdown")
-    print("4. Send test task: 'Check water stress at (3, 5) with robot_id xxx and task_id yyy'")
-    print("5. The web UI will automatically POST tool calls to your master node")
+    print("Recommended flow (operator on different network than Jetson):")
+    print("  1. SSH into the Jetson")
+    print("  2. ros2 launch anubix_bringup jetson.launch.py")
+    print("     (or: ros2 run anubix_master master_node --tunnel cloudflared)")
+    print("  3. The master node starts a Cloudflare quick tunnel, re-registers the")
+    print("     live HTTPS URL into this profile, and prints it to the console.")
+    print("  4. Open https://www.omnilink-agents.com on ANY laptop")
+    print("  5. Select 'ANUBIX' from the agent dropdown")
+    print("  6. Send a task — tool calls flow over the tunnel automatically.")
     print()
-    print("IMPORTANT: The toolCallbackUrl must be reachable from YOUR BROWSER.")
-    print("If the master node runs on a remote machine (Jetson), you need either:")
-    print("  - SSH port forwarding: ssh -L 5055:localhost:5055 jetson")
-    print("  - Or set ANUBIX_CALLBACK_URL to the Jetson's LAN IP")
+    print("Per OmniLink Remote Agent Access §3, the toolCallbackUrl must be")
+    print("loopback or an https:// URL with a trusted cert. The cloudflared")
+    print("quick tunnel satisfies that — no SSH forwarding required, and the")
+    print("operator's laptop needs ZERO setup.")
     print()
 
 
