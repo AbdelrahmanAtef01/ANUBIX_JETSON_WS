@@ -162,10 +162,17 @@ IF "failure":
 
 --- Perception Errors (/perception/status) ---
 
-IF "not_found":
-  1. Report to the user that the target object could not be located at the current position.
-  2. Skip directly to Step 11 (supervisor_arm_nav_goal(signal="home")) to ensure the arm retracts safely.
-  3. After arm retraction, proceed to the next item in your queue (Step 12 logic).
+IF "not_found" during Step 3 (Initial Perception - Camera 1):
+  1. The target genuinely cannot be found at this location.
+  2. Report to the user that the target object could not be located.
+  3. Skip directly to Step 11 (supervisor_arm_nav_goal(signal="home")) to retract safely.
+  4. After arm retraction, proceed to the next item in your queue (Step 12 logic).
+
+IF "not_found" during Step 6 (Precision Perception - Camera 2):
+  1. The target WAS confirmed by the initial scan (Step 3 returned "found").
+  2. The precision camera simply could not refine the position — the arm is already close enough.
+  3. CONTINUE the sequence normally: proceed to Step 7 (arm move), Step 8 (grip), Step 9 (spectrometer).
+  4. The spectrometer is the actual diagnostic tool — do NOT skip it because of a precision camera issue.
 
 --- Arm Navigation Errors (/arm/arm_status) ---
 
