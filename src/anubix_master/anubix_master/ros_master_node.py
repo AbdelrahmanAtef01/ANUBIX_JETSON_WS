@@ -426,30 +426,62 @@ class ToolCallbackHandler(http.server.BaseHTTPRequestHandler):
     bridge: Optional['AnubixROSBridge'] = None
 
     def log_message(self, fmt, *args):
-        log.debug(f"[HTTP] {fmt % args}")
+        # Promote HTTP access lines to INFO so we can see exactly what the
+        # OmniLink frontend (via the cloudflared tunnel) is sending us. The
+        # Agents PDF p.95 calls out "browser cannot reach the toolCallbackUrl"
+        # as the #1 cause of silent tool failures; this log makes it obvious.
+        log.info(f"[HTTP] {self.address_string()} - {fmt % args}")
 
     def _cors_headers(self):
+        # CORS:
+        # - Allow all origins (the OmniLink web UI is on omnilink-agents.com).
+        # - Echo whatever Access-Control-Request-Headers the browser asked for
+        #   in the preflight, so we don't reject unknown auth/trace headers
+        #   the frontend may add (Authorization, X-Tool-Call-Id, etc).
+        #   Per OmniLink Remote Agent Access §3 and Agents PDF p.106 ("Other
+        #   origins -- Wildcarded -- allowed with standard restrictions"),
+        #   this is the supported configuration for a remote tool server.
+        # - Send Access-Control-Allow-Private-Network=true for Chrome's PNA
+        #   (Remote Agent Access §3).
+        requested = self.headers.get("Access-Control-Request-Headers")
+        allowed = requested if requested else "*"
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", allowed)
+        self.send_header("Access-Control-Expose-Headers", "*")
         self.send_header("Access-Control-Allow-Private-Network", "true")
+        self.send_header("Vary", "Origin, Access-Control-Request-Headers")
 
     def do_OPTIONS(self):
+        log.info(f"[HTTP] CORS preflight from {self.headers.get('Origin', '?')} "
+                 f"for {self.path} (req-headers={self.headers.get('Access-Control-Request-Headers', '-')})")
         self.send_response(204)
         self._cors_headers()
         self.send_header("Access-Control-Max-Age", "86400")
         self.end_headers()
 
     def do_GET(self):
-        if self.path == "/health":
-            body = json.dumps({"status": "ok", "node": "anubix_master"}).encode()
+        # /health and / both return 200 with a small JSON. Some clients
+        # (and the OmniLink UI's reachability probe) hit the base URL with
+        # a GET to check liveness; returning 200 here avoids the false
+        # "Failed to fetch" some browsers throw on probe-404s.
+        if self.path in ("/health", "/", "/tool"):
+            body = json.dumps({
+                "status": "ok",
+                "node": "anubix_master",
+                "endpoints": {"POST /tool": "execute a single tool call"},
+            }).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self._cors_headers()
             self.end_headers()
             self.wfile.write(body)
         else:
-            self.send_error(404)
+            self.send_response(404)
+            self._cors_headers()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "not found", "path": self.path}).encode())
 
     def do_POST(self):
         if self.path != "/tool":
