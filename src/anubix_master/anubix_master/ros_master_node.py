@@ -21,11 +21,9 @@ The web UI drives the tool-call loop automatically.
 """
 
 import os
-import re
 import sys
 import json
 import time
-import shutil
 import logging
 import argparse
 import threading
@@ -777,14 +775,7 @@ def parse_args():
     p.add_argument('--host', type=str, default='0.0.0.0',
                    help="Tool callback HTTP server bind address (default 0.0.0.0)")
     p.add_argument('--callback-url', type=str, default='',
-                   help="Explicit toolCallbackUrl override (skips tunnel startup). "
-                        "Also settable via ANUBIX_TOOL_CALLBACK_URL env var.")
-    p.add_argument('--tunnel', type=str, default='cloudflared',
-                   choices=['cloudflared', 'ngrok', 'none'],
-                   help="Tunnel backend used to publish a public HTTPS URL for the "
-                        "tool-callback server. Default 'cloudflared' (no signup, per "
-                        "OmniLink Remote Agent Access §5.1). Set to 'none' for "
-                        "loopback-only setups (e.g. when using SSH port forwarding).")
+                   help="Override toolCallbackUrl (default: http://127.0.0.1:<port>/tool)")
     p.add_argument('--feedback-timeout', type=float, default=120.0,
                    help="ROS feedback timeout (default 120s)")
     p.add_argument('--arm-home', type=float, nargs=3, default=[0.0, 0.0, 0.3],
@@ -811,37 +802,11 @@ def _get_wifi_ip() -> str:
         return "127.0.0.1"
 
 
-def _drain_pipe(pipe):
-    """Continuously drain a pipe so its OS buffer never fills and blocks the writer."""
-    try:
-        for _ in iter(pipe.readline, b""):
-            pass
-    except Exception:
-        pass
-
-
-def _kill_tunnel_process(name: str) -> None:
-    """Best-effort kill of any leftover tunnel process from a previous run."""
-    if shutil.which("pkill"):
-        subprocess.run(["pkill", "-f", name], capture_output=True)
-        time.sleep(1)
-
-
-def _start_ngrok(port: int) -> Tuple[str, subprocess.Popen]:
-    """Start an ngrok HTTP tunnel for the given port.
-
-    Returns (public_https_url, process). The caller is responsible for terminating
-    the process on shutdown. Free-tier ngrok URLs rotate on every restart, which is
-    why the master node always pushes the live URL back into the ANUBIX profile
-    before announcing itself ready.
-    """
-    if shutil.which("ngrok") is None:
-        raise RuntimeError(
-            "ngrok not found on PATH. Install it from https://ngrok.com/download "
-            "and run `ngrok config add-authtoken <token>` once (free signup)."
-        )
-
-    _kill_tunnel_process("ngrok")
+def _start_ngrok(port: int) -> str:
+    """Start ngrok tunnel for the given port and return the public HTTPS URL."""
+    # Kill any existing ngrok process to avoid conflicts
+    subprocess.run(["pkill", "-f", "ngrok"], capture_output=True)
+    time.sleep(1)
 
     proc = subprocess.Popen(
         ["ngrok", "http", str(port), "--log=stdout", "--log-format=json"],
@@ -849,135 +814,24 @@ def _start_ngrok(port: int) -> Tuple[str, subprocess.Popen]:
         stderr=subprocess.STDOUT,
     )
 
+    # Read ngrok JSON log lines until we see the tunnel URL (up to 15s)
     deadline = time.time() + 15
     while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(
-                f"ngrok exited with code {proc.returncode} before producing a tunnel URL. "
-                "Run `ngrok config add-authtoken <token>` once to authenticate."
-            )
         line = proc.stdout.readline()
         if not line:
-            time.sleep(0.05)
-            continue
+            break
         try:
             entry = json.loads(line.decode())
+            # ngrok emits {"url":"https://..."} when the tunnel is ready
             url = entry.get("url", "")
             if url.startswith("https://"):
-                url = url.rstrip("/")
-                log.info(f"[NGROK] tunnel established: {url}")
-                threading.Thread(target=_drain_pipe, args=(proc.stdout,), daemon=True).start()
-                return url, proc
+                print(f"  ngrok tunnel established: {url}")
+                return url.rstrip("/")
         except (json.JSONDecodeError, UnicodeDecodeError):
-            continue
+            pass
 
     proc.kill()
-    raise RuntimeError("ngrok did not produce a tunnel URL within 15s.")
-
-
-def _start_cloudflared(port: int) -> Tuple[str, subprocess.Popen]:
-    """Start a Cloudflare quick tunnel for the given port.
-
-    Per OmniLink Remote Agent Access §5.1: cloudflared quick mode is free, requires
-    no signup, and produces a real Let's-Encrypt-backed HTTPS URL — which is exactly
-    what the OmniLink hosted UI needs to bypass the mixed-content rule (§3) when
-    reaching back to an agent on a different network.
-
-    Returns (public_https_url, process). The caller must terminate the process on
-    shutdown so we don't leave dangling tunnels.
-    """
-    if shutil.which("cloudflared") is None:
-        raise RuntimeError(
-            "cloudflared not found on PATH. Install it on the Jetson with:\n"
-            "  curl -L https://github.com/cloudflare/cloudflared/releases/latest/"
-            "download/cloudflared-linux-arm64 -o /usr/local/bin/cloudflared\n"
-            "  sudo chmod +x /usr/local/bin/cloudflared\n"
-            "(No Cloudflare account is required for quick tunnels.)"
-        )
-
-    _kill_tunnel_process("cloudflared")
-
-    proc = subprocess.Popen(
-        [
-            "cloudflared", "tunnel",
-            "--url", f"http://localhost:{port}",
-            "--no-autoupdate",
-            "--logfile", "/tmp/cloudflared.log",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-
-    # cloudflared advertises the URL on stdout/stderr; format example:
-    #   |  https://random-words-1234.trycloudflare.com    |
-    url_pattern = re.compile(rb"https://[a-z0-9\-]+\.trycloudflare\.com")
-
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(
-                f"cloudflared exited with code {proc.returncode} before producing "
-                "a tunnel URL. Check /tmp/cloudflared.log for details."
-            )
-        line = proc.stdout.readline()
-        if not line:
-            time.sleep(0.1)
-            continue
-        match = url_pattern.search(line)
-        if match:
-            url = match.group(0).decode().rstrip("/")
-            log.info(f"[CLOUDFLARED] quick tunnel established: {url}")
-            threading.Thread(target=_drain_pipe, args=(proc.stdout,), daemon=True).start()
-            return url, proc
-
-    proc.kill()
-    raise RuntimeError(
-        "cloudflared did not produce a tunnel URL within 30s. "
-        "Check /tmp/cloudflared.log."
-    )
-
-
-def _resolve_callback_url(
-    args: argparse.Namespace,
-) -> Tuple[str, Optional[subprocess.Popen]]:
-    """Determine the toolCallbackUrl per OmniLink Remote Agent Access §3.
-
-    Priority order:
-    1. Explicit --callback-url flag (operator already has a stable URL)
-    2. ANUBIX_TOOL_CALLBACK_URL env var (same purpose, scriptable)
-    3. --tunnel cloudflared|ngrok (start tunnel here, use its URL)
-    4. --tunnel none → fall back to http://localhost:<port>/tool
-
-    Returns (url, tunnel_process). tunnel_process is None for options 1/2/4.
-    """
-    if args.callback_url:
-        log.info(f"[CALLBACK] using explicit --callback-url: {args.callback_url}")
-        return args.callback_url.rstrip("/"), None
-
-    env_url = os.environ.get("ANUBIX_TOOL_CALLBACK_URL", "").strip()
-    if env_url:
-        if not env_url.rstrip("/").endswith("/tool"):
-            env_url = env_url.rstrip("/") + "/tool"
-        log.info(f"[CALLBACK] using ANUBIX_TOOL_CALLBACK_URL: {env_url}")
-        return env_url, None
-
-    if args.tunnel == "cloudflared":
-        url, proc = _start_cloudflared(args.port)
-        return f"{url}/tool", proc
-
-    if args.tunnel == "ngrok":
-        url, proc = _start_ngrok(args.port)
-        return f"{url}/tool", proc
-
-    # args.tunnel == "none"
-    fallback = f"http://localhost:{args.port}/tool"
-    log.warning(
-        "[CALLBACK] tunnel=none → toolCallbackUrl falls back to localhost. "
-        "Per docs §3, the browser must see localhost / 127.0.0.1 / [::1] OR an "
-        "HTTPS URL with a trusted certificate. If your laptop is on a different "
-        "network than the Jetson, you need --tunnel cloudflared instead."
-    )
-    return fallback, None
+    raise RuntimeError("ngrok did not start within 15 seconds — is it installed and authenticated?")
 
 
 def main():
@@ -998,7 +852,12 @@ def main():
     print(f"  OMNI_KEY: {omni_key[:15]}...")
     print(f"  Port: {args.port}")
     print(f"  Host: {args.host}")
-    print(f"  Tunnel: {args.tunnel}")
+
+    # Determine tool callback URL
+    # OmniLink's CSP only allows localhost/* — use SSH port forwarding from the
+    # remote device: ssh -L 5055:localhost:5055 user@<jetson-ip>
+    tool_callback_url = args.callback_url or f"http://localhost:{args.port}/tool"
+    print(f"  toolCallbackUrl: {tool_callback_url}")
 
     # Initialize ROS 2
     print("  Initializing ROS 2...")
@@ -1022,8 +881,7 @@ def main():
     # Set the bridge reference on the handler class
     ToolCallbackHandler.bridge = bridge
 
-    # Start HTTP tool callback server BEFORE the tunnel so cloudflared has a live
-    # backend the moment its quick-tunnel handshake completes.
+    # Start HTTP tool callback server
     server = http.server.ThreadingHTTPServer(
         (args.host, args.port), ToolCallbackHandler
     )
@@ -1031,23 +889,7 @@ def main():
     server_thread.start()
     print(f"  Tool callback server listening on {args.host}:{args.port}")
 
-    # Determine the toolCallbackUrl the browser will see.
-    # Per OmniLink Remote Agent Access §3: the URL the browser fetches must be
-    # localhost / 127.0.0.1 / [::1] OR an https:// URL with a trusted cert.
-    # For a remote operator on a different network, the documented answer is
-    # §5.1 Option E — an HTTPS tunnel (cloudflared quick mode, free, no signup).
-    tunnel_proc: Optional[subprocess.Popen] = None
-    try:
-        tool_callback_url, tunnel_proc = _resolve_callback_url(args)
-    except Exception as e:
-        log.error(f"[TUNNEL] Failed to start tunnel: {e}")
-        log.error("[TUNNEL] Falling back to http://localhost — browser on a remote "
-                  "network will NOT be able to reach this (mixed-content / CSP).")
-        tool_callback_url = f"http://localhost:{args.port}/tool"
-
-    print(f"  toolCallbackUrl: {tool_callback_url}")
-
-    # Update agent profile with the resolved toolCallbackUrl
+    # Update agent profile with toolCallbackUrl
     print("  Updating ANUBIX agent profile...")
     client = OmniLinkClient(omni_key=omni_key, timeout=30)
     agent_prompt = load_agent_prompt()
@@ -1066,46 +908,21 @@ def main():
     print(f"  Tool callback URL: {tool_callback_url}")
     print(f"  How it works:")
     print(f"    1. Open OmniLink web UI: https://www.omnilink-agents.com")
-    print(f"    2. Select 'ANUBIX' agent (the profile was just updated with the")
-    print(f"       public HTTPS tunnel URL above)")
+    print(f"    2. Select 'ANUBIX' agent")
     print(f"    3. Send a task (e.g. 'Check disease at 40,45 with robot_id=abc task_id=def')")
-    print(f"    4. The AI emits tool calls -> the browser POSTs them to the")
-    print(f"       cloudflared tunnel -> we execute via ROS 2")
-    print(f"    5. Results flow back to the AI automatically")
+    print(f"    4. The AI will emit tool calls -> web UI POSTs them here -> we execute via ROS")
+    print(f"    5. Results flow back to AI automatically")
     print()
-    if tunnel_proc is not None:
-        print("  NOTE: Quick-tunnel URLs rotate on every restart. The master node")
-        print("        re-registers the live URL into the ANUBIX profile each time")
-        print("        it starts, so this is handled automatically.")
-        print()
     print(f"  Press Ctrl+C to stop.")
     print("-" * 70)
 
     try:
         while True:
             time.sleep(1.0)
-            # If the tunnel daemon dies mid-session, the toolCallbackUrl becomes
-            # unreachable from the browser. Surface that loudly instead of letting
-            # the AI's tool calls silently hang.
-            if tunnel_proc is not None and tunnel_proc.poll() is not None:
-                log.error(
-                    f"[TUNNEL] {args.tunnel} process exited (code={tunnel_proc.returncode}). "
-                    "Tool calls from the OmniLink UI will fail until you restart."
-                )
-                tunnel_proc = None
     except KeyboardInterrupt:
         print("\n[STOP] Ctrl+C received")
     finally:
         log.info("[SHUTDOWN] Cleaning up...")
-        if tunnel_proc is not None and tunnel_proc.poll() is None:
-            log.info(f"[SHUTDOWN] Terminating {args.tunnel} tunnel process")
-            try:
-                tunnel_proc.terminate()
-                tunnel_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                tunnel_proc.kill()
-            except Exception as e:
-                log.warning(f"[SHUTDOWN] Tunnel cleanup error: {e}")
         server.shutdown()
         bridge.destroy_node()
         executor.shutdown()
