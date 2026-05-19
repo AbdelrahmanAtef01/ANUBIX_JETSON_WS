@@ -34,7 +34,7 @@ anubix_arm:
     monitor_hz: 0.03       # Z-floor monitor poll interval (seconds)
 
     # ── hardware connection ──────────────────────────────────────────────
-    arm_host: '192.168.0.232'
+    arm_host: '192.168.0.100'
     arm_port: 4500
     max_velocity_scaling: 0.5
     max_acceleration_scaling: 0.5
