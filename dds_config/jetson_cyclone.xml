@@ -1,66 +1,29 @@
 <!--
   CycloneDDS configuration for the Jetson Orin Nano.
 
-  Goals:
-    (a) Local participant discovery between separate ROS terminals on
-        this Jetson always works, even when the direct-ethernet link
-        to the RPi is not yet configured (no 192.168.10.1 interface).
-    (b) Cross-machine discovery to the RPi works over the direct
-        ethernet link once 192.168.10.1 is up.
+  Single autodetermine interface — Cyclone picks whichever NIC is up.
+  This avoids crashes when the RPi direct-ethernet link (192.168.10.1)
+  is not configured: previous configs that pinned to that address or
+  combined it with loopback caused either "interface not found" aborts
+  or "same interface selected twice" errors.
 
-  Why this shape:
-    Previous revisions tried to pin the interface to a hardcoded name
-    ("eth0") or hardcoded address (192.168.10.1). Both are fragile —
-    if the kernel renames the USB-Ethernet adapter, or if the user
-    boots the Jetson without the RPi cable, Cyclone has nothing to
-    bind and falls back to undefined behavior. Symptom: `ros2 node
-    list` and `ros2 topic list` return empty even though every node
-    is running fine inside the launch.
-
-    We then tried `autodetermine="true"` as a second entry. That
-    failed in the OPPOSITE way: when 192.168.10.1 IS up, autodetermine
-    picks the same physical NIC (the direct link is also the default
-    route) and Cyclone aborts every node with "the same interface
-    may not be selected twice" → rmw_create_node fails.
-
-    Now: direct-link IP as a "best-effort" interface
-    (presence_required=false), and explicit loopback (name="lo") as
-    the fallback. lo is always present, never collides with eth0,
-    and combined with the localhost <Peer/> below it keeps
-    cross-process discovery alive even before the direct link is up.
+  The RPi peer (192.168.10.2) stays in Discovery/Peers so cross-machine
+  DDS traffic flows as soon as that link comes up — but if it never
+  does, nothing crashes.
 
   Network topology:
-    Jetson IP  192.168.10.1 / 24  (this machine; optional at boot)
-    RPi    IP  192.168.10.2 / 24  (peer)
+    Jetson  enp8p1s0  192.168.10.1/24  (RPi link, optional at boot)
+                      192.168.0.100/24 (arm link)
+    RPi               192.168.10.2/24  (peer, may be absent)
+    Arm               192.168.0.232    (TCP, not DDS)
 -->
 <CycloneDDS>
   <Domain id="any">
 
     <General>
       <Interfaces>
-        <!--
-          Preferred interface: the direct ethernet link to the RPi.
-          presence_required="false" means Cyclone WILL NOT abort if
-          192.168.10.1 is not configured on any interface — it just
-          uses the autodetected one below. This is what makes local
-          discovery survive a boot without the RPi cable.
-        -->
-        <NetworkInterface address="192.168.10.1" presence_required="false" priority="10"/>
-        <!--
-          Fallback: explicit loopback. Always present, distinct from
-          eth0 (so no "same interface twice" error when the direct
-          link is up), and combined with the localhost <Peer/> entry
-          below it keeps cross-process discovery on this Jetson alive
-          even when the RPi cable is unplugged.
-        -->
-        <NetworkInterface name="lo" priority="0"/>
+        <NetworkInterface autodetermine="true"/>
       </Interfaces>
-      <!--
-        SPDP = multicast for the small Simple Participant Discovery
-        Protocol packets only; bulk data still flows unicast. The
-        minimum needed for local-process discovery without flooding
-        the direct ethernet link with heavy multicast traffic.
-      -->
       <AllowMulticast>spdp</AllowMulticast>
     </General>
 
@@ -68,21 +31,12 @@
       <ParticipantIndex>auto</ParticipantIndex>
       <MaxAutoParticipantIndex>32</MaxAutoParticipantIndex>
       <Peers>
-        <!--
-          localhost: belt-and-suspenders for cross-terminal discovery
-          on this Jetson, in case multicast SPDP is blocked on lo for
-          any reason. Without this, topics from local launches can
-          randomly disappear from `ros2 topic list`.
-        -->
         <Peer address="localhost"/>
-        <!-- Raspberry Pi over the direct ethernet link -->
         <Peer address="192.168.10.2"/>
       </Peers>
     </Discovery>
 
     <Tracing>
-      <!-- "error" suppresses peer-discovery warnings when RPi is offline.
-           Set to "warning", "config", or "finest" for debugging. -->
       <Verbosity>error</Verbosity>
       <OutputFile>stderr</OutputFile>
     </Tracing>
