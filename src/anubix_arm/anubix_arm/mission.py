@@ -14,6 +14,7 @@ import threading
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import String
 
@@ -37,8 +38,14 @@ class MissionRunner(Node):
 
     def __init__(self):
         super().__init__('mission_runner')
+        goal_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
         self._pub = self.create_publisher(
-            PoseStamped, '/supervisor/arm_nav_goal', 10)
+            PoseStamped, '/supervisor/arm_nav_goal', goal_qos)
         self._sub = self.create_subscription(
             String, '/arm/arm_status', self._on_status, 10)
         self._event = threading.Event()

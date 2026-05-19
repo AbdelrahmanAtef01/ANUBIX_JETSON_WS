@@ -342,7 +342,7 @@ class ArmNode(Node):
         cmd_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
-            depth=1,
+            depth=10,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         force_stop_qos = QoSProfile(
