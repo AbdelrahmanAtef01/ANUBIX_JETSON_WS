@@ -37,7 +37,7 @@
     </Discovery>
 
     <Tracing>
-      <Verbosity>error</Verbosity>
+      <Verbosity>severe</Verbosity>
       <OutputFile>stderr</OutputFile>
     </Tracing>
 
