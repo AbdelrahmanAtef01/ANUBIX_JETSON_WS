@@ -81,8 +81,9 @@
     </Discovery>
 
     <Tracing>
-      <!-- Set to "config" or "finest" for deep DDS debugging -->
-      <Verbosity>warning</Verbosity>
+      <!-- "error" suppresses peer-discovery warnings when RPi is offline.
+           Set to "warning", "config", or "finest" for debugging. -->
+      <Verbosity>error</Verbosity>
       <OutputFile>stderr</OutputFile>
     </Tracing>
 
