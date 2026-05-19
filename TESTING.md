@@ -111,8 +111,9 @@ ros2 launch anubix_bringup jetson.launch.py
 [POLL] Poll loop started
 
   ANUBIX Arm Control Node - Jetson Orin Nano
-  Mode: SIMULATE
-  Arm move delay: 2.0s   Grip delay: 1.0s
+  Mode: SIMULATE                            (or: HARDWARE (Pro450))
+  Arm move delay: 2.0s  Grip delay: 1.0s
+  Home pose: (0.000, 0.000, 0.300)
 [ARM] Ready and waiting for commands.
 
   ANUBIX Spectrometer Node - Jetson Orin Nano
@@ -321,6 +322,10 @@ ros2 topic echo /nav/status
 
 ### Test 2: Arm Stack (runs on Jetson)
 
+The arm node now runs a **pre-flight check** (workspace bounds, singularity,
+reach, self-collision) and **homes first** before every move — even in simulate
+mode. This matches the real Pro450 hardware behaviour.
+
 ```bash
 # 2a. Send absolute arm goal (frame=base_link → real cartesian move)
 ros2 topic pub --once /supervisor/arm_nav_goal geometry_msgs/PoseStamped \
@@ -332,9 +337,22 @@ ros2 topic pub --once /supervisor/arm_nav_goal geometry_msgs/PoseStamped \
 [ARM] ========================================
 [ARM] Arm goal RECEIVED: (0.300, 0.200, 0.150) frame="base_link"
 [ARM] ========================================
-[ARM] Moving to (0.300, 0.200, 0.150) — waiting 2.0s...
-[ARM] Move COMPLETE -> "success" pos=(0.300, 0.200, 0.150)
+[ARM] [SIM] Running pre-flight check...
+[ARM]   preflight: Workspace   OK
+[ARM]   preflight: XY radius   OK  (361mm from axis)
+[ARM]   preflight: Reach       OK  (365mm)
+[ARM]   preflight: IK check    — skipped (simulate mode)
+[ARM]   preflight: Self-collision (home) OK
+[ARM] [SIM] Going to home position — waiting 2.0s...
+[ARM] [SIM] Home reached.
+[ARM] [SIM] Moving to target (0.300, 0.200, 0.150) — waiting 2.0s...
+[ARM] [SIM] Move COMPLETE -> "success" pos=(0.300, 0.200, 0.150)
 ```
+
+> In HARDWARE mode the `[SIM]` prefix changes to `[HW]` / direct logs,
+> the pre-flight also verifies IK reachability and full-path self-collision
+> (18-step interpolation), and the move executes as a 3-phase moveL
+> (lift → travel → descend) with a live Z-floor monitor.
 
 **Verify:**
 ```bash
@@ -354,7 +372,7 @@ ros2 topic pub --once /supervisor/grip std_msgs/Bool '{data: true}'
 [ARM] ========================================
 [ARM] Grip command RECEIVED: CLOSE (grip)
 [ARM] ========================================
-[ARM] Gripper close — waiting 1.0s...
+[ARM] [SIM] Gripper close — waiting 1.0s...
 [ARM] Gripper CLOSED -> "successful_grip"
 [ARM] Touch sensor -> true
 ```
@@ -365,10 +383,18 @@ ros2 topic echo /arm/gripper_status --once   # data: 'successful_grip'
 ros2 topic echo /arm/touch_status   --once   # data: true
 ```
 
+```bash
+# 2c. (Optional) Run the 8-waypoint mission test
+ros2 run anubix_arm mission
+# Sends 8 predefined waypoints sequentially, waits for success/failure each.
+# Useful for verifying arm reach and pre-flight across the workspace.
+```
+
 > Frames matter: `frame_id="base_link"` (or empty) is an absolute move;
 > `frame_id="calibration"` is the small relative step the vision node
 > uses for camera-2 calibration. Both publish `"success"` to
-> `/arm/arm_status` on completion.
+> `/arm/arm_status` on completion. If a target is unreachable, the arm
+> publishes `"preflight_failed"` instead (no motion attempted).
 
 ### Test 3: Spectrometer Stack (runs on Jetson)
 
@@ -619,12 +645,19 @@ Go to plant at coordinates 3,5. Check for disease using camera 1. If found, move
 [CMD] >>> supervisor/arm_nav_goal_move
 [TX] /supervisor/arm_nav_goal (signal=move, dest=target)
 [ARM] Arm goal RECEIVED: (0.450, 0.120, 0.850) frame="base_link"
-[ARM] Move COMPLETE -> "success" pos=(0.450, 0.120, 0.850)
+[ARM] [SIM] Running pre-flight check...
+[ARM]   preflight: Workspace   OK
+[ARM]   preflight: ...
+[ARM] [SIM] Going to home position — waiting 2.0s...
+[ARM] [SIM] Home reached.
+[ARM] [SIM] Moving to target (0.450, 0.120, 0.850) — waiting 2.0s...
+[ARM] [SIM] Move COMPLETE -> "success" pos=(0.450, 0.120, 0.850)
 [RX] /arm/arm_status = "success"
 
 [CMD] >>> supervisor/grip_true
 [TX] /supervisor/grip = True (close)
 [ARM] Grip command RECEIVED: CLOSE (grip)
+[ARM] [SIM] Gripper close — waiting 1.0s...
 [ARM] Gripper CLOSED -> "successful_grip"
 [ARM] Touch sensor -> true
 [RX] /arm/gripper_status = "successful_grip"
@@ -862,7 +895,7 @@ The install script handles this automatically.
 ✅ **DDS**: Topics from both sides visible with `ros2 topic list`  
 ✅ **Heartbeats**: `/bridge/jetson_heartbeat` and `/bridge/rpi_heartbeat` flowing at 1 Hz  
 ✅ **Navigation**: Publishes `navigating` → `point_reached` on `/nav/status`; respects `/supervisor/nav_vision` standoff; receives `/supervisor/robot_id` and `/supervisor/task_id`  
-✅ **Arm**: Publishes `success` on `/arm/arm_status`, `successful_grip` on `/arm/gripper_status`, `true` on `/arm/touch_status`  
+✅ **Arm**: Pre-flight passes, publishes `success` on `/arm/arm_status` (or `preflight_failed` if target unreachable), `successful_grip` on `/arm/gripper_status`, `true` on `/arm/touch_status`; `ros2 run anubix_arm mission` completes all 8 waypoints  
 ✅ **Spectrometer**: Connects to TCP `host:5000`/`5001`, publishes `success` on `/spectrometer/status`, JSON on `/spectrometer/result` (no simulate mode)  
 ✅ **Vision**: Publishes `found` on `/perception/status`, 3D Pose on `/perception/target_pose`; camera 2 performs 2-phase calibration via the arm  
 ✅ **Supabase**: Publishes `success` on `/supabase/upload_status`, new row appears in dashboard with payload-supplied robot/task IDs  
@@ -879,7 +912,20 @@ package's `config/*.yaml`). To run any stack against real hardware,
 follow the dedicated guides kept alongside the project (one level above
 this workspace, NOT inside either git repo):
 
-- `REAL_ARM_STACK.md` — wiring up the real arm + gripper (Jetson)
+- **Arm (Pro450)** — the arm node already has full hardware support
+  built in. To switch:
+  1. Set `simulate: false` in
+     `src/anubix_arm/config/arm_params.yaml`
+  2. Install the driver: `pip install pymycobot`
+  3. Connect the Pro450 via Ethernet (default
+     `192.168.0.232:4500` — editable in the same yaml:
+     `arm_host` / `arm_port`)
+  4. Tune `home_joint_1..6` (degrees) to your arm's actual stowed
+     pose, and `home_x/y/z` (metres) to match
+  5. Rebuild: `colcon build --packages-select anubix_arm`
+  6. Verify with `ros2 run anubix_arm mission` (8-waypoint test)
+  See also `REAL_ARM_STACK.md` for gripper wiring and touch-sensor
+  integration (TODOs in `_real_grip`).
 - `REAL_NAVIGATION_STACK.md` — wiring up the real Pi-driven nav base,
   including the 2 Hz Supabase location uploader the implementer must
   add
