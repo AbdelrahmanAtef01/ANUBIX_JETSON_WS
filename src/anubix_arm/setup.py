@@ -23,6 +23,7 @@ setup(
     entry_points={
         'console_scripts': [
             'arm_node = anubix_arm.arm_node:main',
+            'mission = anubix_arm.mission:main',
         ],
     },
 )

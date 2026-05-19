@@ -1,29 +1,42 @@
 anubix_arm:
   ros__parameters:
-    simulate: true
+    # ── mode ─────────────────────────────────────────────────────────────
+    # true  = time-sleep mock (no hardware needed)
+    # false = real Pro450 via pymycobot over Ethernet
+    simulate: false
+
+    # Simulation-only delays (seconds)
     arm_move_delay: 2.0
     grip_delay: 1.0
-    # Home position for arm retracted/stowed state
-    # Mocked home pose published as /arm/current_pose at startup so the
-    # vision node always has a base to compose calibration moves on.
-    # Used by supervisor/arm_nav_goal_home command
-    # Cartesian coordinates in base_link frame
+
+    # ── home position ────────────────────────────────────────────────────
+    # Cartesian (metres, base_link frame) — published as initial
+    # /arm/current_pose so the vision node always has a calibration base.
     home_x: 0.0
     home_y: 0.0
     home_z: 0.3
-    # Joint angles for home position (radians)
-    # TODO: Configure actual joint angles for hardware arm
-    home_joint_1: 0.0  # Base rotation
-    home_joint_2: 0.0  # Shoulder
-    home_joint_3: 0.0  # Elbow
-    home_joint_4: 0.0  # Wrist pitch
-    home_joint_5: 0.0  # Wrist roll
+
+    # Joint angles (degrees, Pro450 convention)
+    home_joint_1: 0.0      # Base rotation
+    home_joint_2: 0.0      # Shoulder
+    home_joint_3: -90.0    # Elbow
+    home_joint_4: 0.0      # Wrist pitch
+    home_joint_5: 0.0      # Wrist roll
+    home_joint_6: 0.0      # Tool twist
+
+    # ── publishing ───────────────────────────────────────────────────────
     pose_publish_rate_hz: 5.0
-    # TODO: Arm hardware parameters
-    # arm_controller: "joint_trajectory_controller"
-    # gripper_controller: "gripper_action_controller"
-    # planning_group: "arm"
-    # max_velocity_scaling: 0.5
-    # max_acceleration_scaling: 0.5
-    # touch_sensor_topic: "/touch_sensor/data"
-    # force_threshold: 2.0
+
+    # ── motion (real hardware) ───────────────────────────────────────────
+    speed: 20              # Pro450 speed units
+    transit_z: 280.0       # mm — safe travel height between moves
+    z_floor: 50.0          # mm — hard floor limit (emergency stop below)
+    monitor_hz: 0.03       # Z-floor monitor poll interval (seconds)
+
+    # ── hardware connection ──────────────────────────────────────────────
+    arm_host: '192.168.0.232'
+    arm_port: 4500
+    max_velocity_scaling: 0.5
+    max_acceleration_scaling: 0.5
+    force_threshold: 2.0
+    touch_sensor_topic: '/touch_sensor/data'
