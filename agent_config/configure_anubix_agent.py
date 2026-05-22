@@ -113,9 +113,19 @@ def configure_agent(api_key, agent_prompt):
                     "y": {
                         "type": "number",
                         "description": "Y coordinate in meters"
+                    },
+                    "phase": {
+                        "type": "string",
+                        "description": (
+                            "Which navigation step this is. "
+                            "'standoff_approach' = Step 2b (vision=true, stop 1m short), "
+                            "'final_close' = Step 4b (vision=false, drive all the way). "
+                            "REQUIRED so the two calls with identical (x, y) stay structurally distinct."
+                        ),
+                        "enum": ["standoff_approach", "final_close"]
                     }
                 },
-                "required": ["x", "y"]
+                "required": ["x", "y", "phase"]
             }
         },
         {
@@ -151,9 +161,19 @@ def configure_agent(api_key, agent_prompt):
                         "type": "string",
                         "description": "Type of perception task",
                         "enum": ["disease", "water_stress", "harvest_status"]
+                    },
+                    "phase": {
+                        "type": "string",
+                        "description": (
+                            "Which perception step this is. "
+                            "'initial_scan' = Step 3b (camera 1, wide-angle), "
+                            "'precision_scan' = Step 6b (camera 2, telephoto). "
+                            "REQUIRED so the two calls with identical task_type stay structurally distinct."
+                        ),
+                        "enum": ["initial_scan", "precision_scan"]
                     }
                 },
-                "required": ["task_type"]
+                "required": ["task_type", "phase"]
             }
         },
         {
@@ -166,9 +186,20 @@ def configure_agent(api_key, agent_prompt):
                         "type": "string",
                         "description": "move=go to target pose, home=return to safe position",
                         "enum": ["move", "home"]
+                    },
+                    "phase": {
+                        "type": "string",
+                        "description": (
+                            "Which arm step this is. "
+                            "'initial_pose' = Step 5 (first signal=move), "
+                            "'grip_pose'    = Step 7 (second signal=move), "
+                            "'retract'      = Step 11 (signal=home). "
+                            "REQUIRED so the two move calls stay structurally distinct."
+                        ),
+                        "enum": ["initial_pose", "grip_pose", "retract"]
                     }
                 },
-                "required": ["signal"]
+                "required": ["signal", "phase"]
             }
         },
         {
