@@ -541,15 +541,12 @@ class ArmNode(Node):
             z_mm = target.position.z * 1000
 
             # ── step 0: pre-flight ───────────────────────────────────────
-            self.get_logger().info('[ARM] [SIM] Running pre-flight check...')
-            passed, report = self._preflight_sim(x_mm, y_mm, z_mm)
-            for line in report:
-                self.get_logger().info(f'[ARM]   preflight: {line}')
-            if not passed:
-                self.get_logger().error(
-                    '[ARM] [SIM] Move REJECTED — pre-flight failed')
-                self._arm_status_pub.publish(String(data='preflight_failed'))
-                return
+            # Simulation mode: skip the geometry check entirely so the
+            # rest of the pipeline can run end-to-end against any pose.
+            # The real-hardware path (_preflight in _do_arm_move) still
+            # enforces reach/IK checks — this only relaxes the simulator.
+            self.get_logger().info(
+                '[ARM] [SIM] Pre-flight skipped (simulate mode — always pass)')
 
             # ── step 1: go home ──────────────────────────────────────────
             self.get_logger().info(
