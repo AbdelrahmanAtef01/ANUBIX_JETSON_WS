@@ -2,16 +2,16 @@
 """
 ANUBIX Jetson Launch
 =====================
-Launches only the nodes that run on the Jetson Orin Nano:
+Launches the nodes that run on the Jetson Orin Nano:
   - anubix_master        (OmniLink AI agent bridge)
   - anubix_arm           (arm control placeholder)
   - anubix_spectrometer  (spectral analysis)
   - anubix_vision        (YOLO leaf detection — RealSense + USB cameras)
   - anubix_jetson_bridge (cross-machine link monitor)
   - anubix_supabase      (Supabase result uploader)
-
-Navigation runs on the Raspberry Pi.
-Launch those with: ros2 launch anubix_bringup_rpi rpi_full.launch.py
+  - anubix_navigation    (nav stack — temporarily hosted here while the RPi is
+                          disconnected; move back to anubix_bringup_rpi once
+                          the RPi rejoins)
 
 Usage:
     ros2 launch anubix_bringup jetson.launch.py
@@ -37,6 +37,7 @@ def generate_launch_description():
     vision_share   = get_package_share_directory('anubix_vision')
     bridge_share   = get_package_share_directory('anubix_jetson_bridge')
     supabase_share = get_package_share_directory('anubix_supabase')
+    nav_share      = get_package_share_directory('anubix_navigation')
 
     master_node = Node(
         package='anubix_master',
@@ -92,6 +93,15 @@ def generate_launch_description():
         emulate_tty=True,
     )
 
+    nav_node = Node(
+        package='anubix_navigation',
+        executable='nav_node',
+        name='anubix_navigation',
+        parameters=[os.path.join(nav_share, 'config', 'nav_params.yaml')],
+        output='screen',
+        emulate_tty=True,
+    )
+
     return LaunchDescription([
         simulate_arg,
         master_node,
@@ -100,4 +110,5 @@ def generate_launch_description():
         vision_node,
         bridge_node,
         supabase_node,
+        nav_node,
     ])
