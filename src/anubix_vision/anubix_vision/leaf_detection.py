@@ -56,50 +56,55 @@ def get_target_leaf(results, frame_w, frame_h):
     Filtration logic to find the optimal target leaf from YOLO segmentation results.
 
     Prefers the left half of the frame; falls back to right when no left leaves exist.
-    Scores candidates by proximity to the bottom-centre grab plane plus a penalty for
-    leaves that are not near the vertical middle of the plant.
+    Scores candidates by proximity to the bottom-centre grab plane, a Y-position
+    penalty (top third preferred over bottom third), and a bonus for unhealthy leaves.
 
     Returns:
-        (all_healthy_leaves, best_target_leaf)
+        (all_leaves, best_target_leaf)
     """
-    healthy_leaves = extract_healthy_leaves(results)
-    if not healthy_leaves:
+    all_leaves = extract_all_leaves(results)
+    if not all_leaves:
         return [], None
 
-    has_left = any(l['centroid'][0] < frame_w // 2 for l in healthy_leaves)
-    has_right = any(l['centroid'][0] >= frame_w // 2 for l in healthy_leaves)
+    has_left = any(l['centroid'][0] < frame_w // 2 for l in all_leaves)
+    has_right = any(l['centroid'][0] >= frame_w // 2 for l in all_leaves)
 
     if has_left:
-        selected = [l for l in healthy_leaves if l['centroid'][0] < frame_w // 2]
+        selected = [l for l in all_leaves if l['centroid'][0] < frame_w // 2]
     elif has_right:
-        selected = [l for l in healthy_leaves if l['centroid'][0] >= frame_w // 2]
+        selected = [l for l in all_leaves if l['centroid'][0] >= frame_w // 2]
     else:
-        return healthy_leaves, None
+        return all_leaves, None
 
     all_y = [l['centroid'][1] for l in selected]
     min_y, max_y = min(all_y), max(all_y)
     plant_height = max_y - min_y
 
     roi_center_x = frame_w // 2
-    roi_bottom_y = frame_h - 20
 
     best_score = float('inf')
     target_leaf = None
 
     for leaf in selected:
-        dist_to_plane = np.sqrt(
-            (leaf['centroid'][0] - roi_center_x) ** 2 +
-            (leaf['lowest_y'] - roi_bottom_y) ** 2
-        )
+        dist_to_plane = leaf['centroid'][0] - roi_center_x
         relative_y = (leaf['centroid'][1] - min_y) / (plant_height if plant_height > 0 else 1)
-        middle_penalty = 0.0 if 0.4 <= relative_y <= 0.6 else abs(relative_y - 0.5) * 500.0
-        score = dist_to_plane + middle_penalty
+
+        if relative_y < 0.33:
+            y_penalty = (0.33 - relative_y) * 200.0
+        elif relative_y > 0.66:
+            y_penalty = (relative_y - 0.66) * 500.0
+        else:
+            y_penalty = 0.0
+
+        health_bonus = -300.0 if leaf['cls'] != CLASS_HEALTHY_LEAF else 0.0
+
+        score = dist_to_plane + y_penalty + health_bonus
 
         if score < best_score:
             best_score = score
             target_leaf = leaf
 
-    return healthy_leaves, target_leaf
+    return all_leaves, target_leaf
 
 
 def get_closest_leaf_to_gripper(results, gripper_x, gripper_y):
