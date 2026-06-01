@@ -488,6 +488,13 @@ class ArmNode(Node):
     #  SUBSCRIBER CALLBACKS
     # ═══════════════════════════════════════════════════════════════════════
 
+    def _is_home_goal(self, target):
+        """Check if the resolved target matches the home position (within 5mm)."""
+        dx = abs(target.position.x - self._home_xyz[0])
+        dy = abs(target.position.y - self._home_xyz[1])
+        dz = abs(target.position.z - self._home_xyz[2])
+        return dx < 0.005 and dy < 0.005 and dz < 0.005
+
     def _on_arm_goal(self, msg: PoseStamped):
         if self._force_stopped:
             self.get_logger().warn('force_stop active — ignoring arm_nav_goal')
@@ -520,6 +527,13 @@ class ArmNode(Node):
                 return
 
             target = self._resolve_goal(goal)
+
+            if self._is_home_goal(target):
+                self.get_logger().info('[SIM] Home goal detected — joint-space homing.')
+                self._go_home()
+                self._arm_status_pub.publish(String(data='success'))
+                return
+
             x = target.position.x * 1000
             y = target.position.y * 1000
             z = target.position.z * 1000
@@ -573,6 +587,12 @@ class ArmNode(Node):
 
             self._clear_errors()
             target = self._resolve_goal(goal)
+
+            if self._is_home_goal(target):
+                self.get_logger().info('Home goal detected — joint-space homing (bypasses IK).')
+                self._go_home()
+                self._arm_status_pub.publish(String(data='success'))
+                return
 
             x = target.position.x * 1000
             y = target.position.y * 1000
