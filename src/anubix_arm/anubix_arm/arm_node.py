@@ -634,15 +634,28 @@ class ArmNode(Node):
 
     def _finish_move(self, target):
         """Read actual coords after a move and publish success."""
-        c_final = self._coords()
-        if c_final:
+        c = self._coords()
+        tx = target.position.x * 1000
+        ty = target.position.y * 1000
+        tz = target.position.z * 1000
+        if c:
             with self._pose_lock:
-                self._current_pose.pose.position.x = c_final[0] / 1000.0
-                self._current_pose.pose.position.y = c_final[1] / 1000.0
-                self._current_pose.pose.position.z = c_final[2] / 1000.0
+                self._current_pose.pose.position.x = c[0] / 1000.0
+                self._current_pose.pose.position.y = c[1] / 1000.0
+                self._current_pose.pose.position.z = c[2] / 1000.0
+            err = math.sqrt((c[0]-tx)**2 + (c[1]-ty)**2 + (c[2]-tz)**2)
+            self.get_logger().info(
+                f'SUCCESS — actual [{c[0]:.1f}, {c[1]:.1f}, {c[2]:.1f}] mm  '
+                f'target [{tx:.1f}, {ty:.1f}, {tz:.1f}] mm  '
+                f'error={err:.1f}mm'
+            )
         else:
             with self._pose_lock:
                 self._current_pose.pose = target
+            self.get_logger().warn(
+                f'SUCCESS — could not read coords, using target '
+                f'[{tx:.1f}, {ty:.1f}, {tz:.1f}] mm'
+            )
         self._publish_current_pose()
         self._arm_status_pub.publish(String(data='success'))
 
