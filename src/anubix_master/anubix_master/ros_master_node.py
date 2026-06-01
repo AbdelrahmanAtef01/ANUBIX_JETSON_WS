@@ -91,6 +91,9 @@ class AnubixROSBridge(Node):
         self._latest_target_pose: Optional[Pose] = None
         self._target_pose_lock = threading.Lock()
         self._post_release_retract = False
+        self._active_camera: int = 1
+        self._latest_arm_pose: Optional[PoseStamped] = None
+        self._arm_pose_lock = threading.Lock()
 
         self._sub_group = ReentrantCallbackGroup()
 
@@ -163,6 +166,8 @@ class AnubixROSBridge(Node):
             Pose, '/perception/target_pose', self._cb_target_pose, sub_qos, callback_group=self._sub_group)
         self.create_subscription(
             Bool, '/supervisor/force_stop', self._cb_force_stop, force_stop_qos, callback_group=self._sub_group)
+        self.create_subscription(
+            PoseStamped, '/arm/current_pose', self._cb_arm_pose, sub_qos, callback_group=self._sub_group)
 
         log.info("[ROS2] AnubixROSBridge initialized")
         log.info(f"       feedback_timeout={feedback_timeout}s")
@@ -206,6 +211,10 @@ class AnubixROSBridge(Node):
         with self._target_pose_lock:
             self._latest_target_pose = msg
         log.info(f"[RX] /perception/target_pose = ({msg.position.x:.2f}, {msg.position.y:.2f}, {msg.position.z:.2f})")
+
+    def _cb_arm_pose(self, msg):
+        with self._arm_pose_lock:
+            self._latest_arm_pose = msg
 
     def _cb_force_stop(self, msg):
         if bool(msg.data):
@@ -291,6 +300,7 @@ class AnubixROSBridge(Node):
         return self._do_nav_goal(0.0, 0.0)
 
     def _do_target_camera(self, camera_number: int) -> str:
+        self._active_camera = int(camera_number)
         self.pub_target_camera.publish(String(data=str(camera_number)))
         log.info(f"[TX] /supervisor/target_camera = {camera_number}")
         time.sleep(0.05)
@@ -321,10 +331,36 @@ class AnubixROSBridge(Node):
             if tgt is None:
                 log.error("[ARM] arm_nav_goal_move but no target_pose received yet!")
                 return '/arm/arm_status: mechanical_error'
-            ps = PoseStamped()
-            ps.header.stamp = self.get_clock().now().to_msg()
-            ps.header.frame_id = 'base_link'
-            ps.pose = tgt
+
+            # Camera 2 publishes RELATIVE offsets from the gripper.
+            # Apply them to the current arm position to get an absolute goal.
+            if self._active_camera == 2:
+                with self._arm_pose_lock:
+                    arm = self._latest_arm_pose
+                if arm is None:
+                    log.error("[ARM] Camera 2 offset but no /arm/current_pose available!")
+                    return '/arm/arm_status: mechanical_error'
+                ps = PoseStamped()
+                ps.header.stamp = self.get_clock().now().to_msg()
+                ps.header.frame_id = 'base_link'
+                ps.pose.position.x = arm.pose.position.x + tgt.position.x
+                ps.pose.position.y = arm.pose.position.y + tgt.position.y
+                ps.pose.position.z = arm.pose.position.z + tgt.position.z
+                ps.pose.orientation = arm.pose.orientation
+                if ps.pose.orientation.w == 0.0 and ps.pose.orientation.x == 0.0:
+                    ps.pose.orientation.w = 1.0
+                log.info(
+                    f"[ARM] Camera 2 offset ({tgt.position.x:.3f}, "
+                    f"{tgt.position.y:.3f}, {tgt.position.z:.3f}) + "
+                    f"arm ({arm.pose.position.x:.3f}, "
+                    f"{arm.pose.position.y:.3f}, {arm.pose.position.z:.3f}) = "
+                    f"({ps.pose.position.x:.3f}, {ps.pose.position.y:.3f}, "
+                    f"{ps.pose.position.z:.3f})")
+            else:
+                ps = PoseStamped()
+                ps.header.stamp = self.get_clock().now().to_msg()
+                ps.header.frame_id = 'base_link'
+                ps.pose = tgt
         else:
             log.error(f"[ARM] Unknown signal '{signal}'")
             return '/arm/arm_status: mechanical_error'

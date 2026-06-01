@@ -867,12 +867,24 @@ class ArmNode(Node):
         target = [x, y, z, rx, ry, rz]
         candidates = []
 
+        # Compute the ideal J1 angle from the target XY position
+        ideal_j1 = math.degrees(math.atan2(y, x)) if (abs(x) > 1 or abs(y) > 1) else 0.0
+
         seed_variants = [list(seed_angles)]
-        for dj1 in (-60, -30, 30, 60):
+        # Full J1 coverage: offsets from current AND absolute candidates near ideal
+        for dj1 in (-150, -120, -90, -60, -30, 30, 60, 90, 120, 150):
             v = list(seed_angles)
             v[0] = max(-165, min(165, v[0] + dj1))
             seed_variants.append(v)
-        for dj3 in (-30, 30):
+        # Absolute J1 seeds at and around the ideal angle for this target
+        for j1_abs in (ideal_j1, ideal_j1 + 180, ideal_j1 - 180,
+                        ideal_j1 + 30, ideal_j1 - 30):
+            j1_clamped = max(-165, min(165, j1_abs))
+            v = list(seed_angles)
+            v[0] = j1_clamped
+            seed_variants.append(v)
+        # Elbow variations
+        for dj3 in (-60, -30, 30, 60):
             v = list(seed_angles)
             v[2] = max(-165, min(165, v[2] + dj3))
             seed_variants.append(v)
