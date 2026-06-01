@@ -11,7 +11,10 @@ anubix_arm:
     # ── home position ────────────────────────────────────────────────────
     # Cartesian (metres, base_link frame) — published as initial
     # /arm/current_pose so the vision node always has a calibration base.
-    home_x: 0.0
+    # On real hardware this is overwritten by actual get_coords() after
+    # homing.  In simulation it IS the published pose, so keep it away
+    # from the J1 singularity (XY must be > 30 mm).
+    home_x: 0.15
     home_y: 0.0
     home_z: 0.3
 

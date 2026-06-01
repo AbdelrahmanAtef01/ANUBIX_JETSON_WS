@@ -365,7 +365,7 @@ class ArmNode(Node):
         self.declare_parameter('simulate', False)
         self.declare_parameter('arm_move_delay',           2.0)
 
-        self.declare_parameter('home_x',                   0.0)
+        self.declare_parameter('home_x',                   0.15)
         self.declare_parameter('home_y',                   0.0)
         self.declare_parameter('home_z',                   0.3)
 
@@ -453,6 +453,17 @@ class ArmNode(Node):
                 self._mc, self._z_floor, self._monitor_hz, self.get_logger()
             )
             self.get_logger().info('Pro 450 connected.')
+
+            c = self._mc.get_coords()
+            if c and len(c) >= 3:
+                self._home_xyz = [c[0] / 1000.0, c[1] / 1000.0, c[2] / 1000.0]
+                self._current_pose.pose.position.x = self._home_xyz[0]
+                self._current_pose.pose.position.y = self._home_xyz[1]
+                self._current_pose.pose.position.z = self._home_xyz[2]
+                self.get_logger().info(
+                    f'Initial coords from hardware: '
+                    f'[{c[0]:.1f}, {c[1]:.1f}, {c[2]:.1f}] mm'
+                )
         else:
             self.get_logger().info('simulate=true — no hardware connection.')
 
@@ -925,7 +936,24 @@ class ArmNode(Node):
         self._mc.send_angles(self._home_angles, self._speed)
         time.sleep(0.35)
         self._wait_stop()
-        self.get_logger().info(f'Home done. Current: {self._coords()}')
+
+        c = self._coords()
+        if c:
+            with self._pose_lock:
+                self._current_pose.pose.position.x = c[0] / 1000.0
+                self._current_pose.pose.position.y = c[1] / 1000.0
+                self._current_pose.pose.position.z = c[2] / 1000.0
+            self._publish_current_pose()
+            self.get_logger().info(
+                f'Home done. Coords: [{c[0]:.1f}, {c[1]:.1f}, {c[2]:.1f}] mm'
+            )
+        else:
+            with self._pose_lock:
+                self._current_pose.pose.position.x = self._home_xyz[0]
+                self._current_pose.pose.position.y = self._home_xyz[1]
+                self._current_pose.pose.position.z = self._home_xyz[2]
+            self._publish_current_pose()
+            self.get_logger().warn('Home done but could not read coords — using home_xyz fallback.')
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
