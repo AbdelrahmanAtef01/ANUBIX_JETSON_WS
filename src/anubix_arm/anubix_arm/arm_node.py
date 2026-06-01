@@ -550,53 +550,15 @@ class ArmNode(Node):
             target = self._resolve_goal(goal)
 
             if self._is_home_goal(target):
-                self.get_logger().info('[SIM] Home goal detected — joint-space homing.')
+                self.get_logger().info('[SIM] Home goal — joint-space homing.')
                 self._go_home()
                 self._arm_status_pub.publish(String(data='success'))
                 return
 
-            x = target.position.x * 1000
-            y = target.position.y * 1000
-            z = target.position.z * 1000
-
-            # Check if small move — skip homing for calibration accuracy
-            with self._pose_lock:
-                cx = self._current_pose.pose.position.x * 1000
-                cy = self._current_pose.pose.position.y * 1000
-                cz = self._current_pose.pose.position.z * 1000
-            dist = math.sqrt((x - cx)**2 + (y - cy)**2 + (z - cz)**2)
-            is_small = dist < self._DIRECT_MOVE_THRESHOLD_MM
-
-            self.get_logger().info('[SIM] Running pre-flight check...')
-            passed, report = self._preflight_sim(x, y, z)
-            for line in report:
-                self.get_logger().info(f'  preflight: {line}')
-            if not passed:
-                self.get_logger().warn(f'[SIM] Pre-flight advisory failed — proceeding anyway')
-
-            if is_small:
-                self.get_logger().info(
-                    f'[SIM] Direct move (delta={dist:.1f}mm) -> '
-                    f'({target.position.x:.4f}, {target.position.y:.4f}, {target.position.z:.4f})')
-                time.sleep(0.3)
-            else:
-                self.get_logger().info('[SIM] Going to home...')
-                self._arm_status_pub.publish(String(data='homing'))
-                time.sleep(self._arm_move_delay)
-                with self._pose_lock:
-                    self._current_pose.pose.position.x = self._home_xyz[0]
-                    self._current_pose.pose.position.y = self._home_xyz[1]
-                    self._current_pose.pose.position.z = self._home_xyz[2]
-                self._publish_current_pose()
-
-                if self._force_stopped:
-                    self._arm_status_pub.publish(String(data='mechanical_error'))
-                    return
-
-                self.get_logger().info(
-                    f'[SIM] arm move -> '
-                    f'({target.position.x:.3f}, {target.position.y:.3f}, {target.position.z:.3f})')
-                time.sleep(self._arm_move_delay)
+            self.get_logger().info(
+                f'[SIM] Moving to ({target.position.x:.3f}, '
+                f'{target.position.y:.3f}, {target.position.z:.3f})')
+            time.sleep(self._arm_move_delay)
 
             if self._force_stopped:
                 self._arm_status_pub.publish(String(data='mechanical_error'))
@@ -611,13 +573,17 @@ class ArmNode(Node):
     #  REAL BACKEND
     # ═══════════════════════════════════════════════════════════════════════
 
-    # Small-move threshold (mm): if target is within this distance of the
-    # current position, do a direct moveL instead of the full home→3-phase
-    # cycle.  This is critical for calibration moves where accuracy matters
-    # more than collision avoidance over a long path.
+    # Small-move threshold (mm): moves under this distance keep the current
+    # orientation for maximum accuracy (calibration). Larger moves use the
+    # arm's current orientation from get_coords().
     _DIRECT_MOVE_THRESHOLD_MM = 50.0
 
     def _real_arm_move(self, goal: PoseStamped):
+        """
+        Direct movement — sends the arm straight from its current position
+        to the target via send_coords.  No homing, no 3-phase detour.
+        The Pro 450's built-in collision mode is the safety net.
+        """
         with self._arm_lock:
             if self._force_stopped:
                 self._arm_status_pub.publish(String(data='mechanical_error'))
@@ -627,7 +593,7 @@ class ArmNode(Node):
             target = self._resolve_goal(goal)
 
             if self._is_home_goal(target):
-                self.get_logger().info('Home goal detected — joint-space homing (bypasses IK).')
+                self.get_logger().info('Home goal — joint-space homing.')
                 self._go_home()
                 self._arm_status_pub.publish(String(data='success'))
                 return
@@ -636,99 +602,26 @@ class ArmNode(Node):
             y = target.position.y * 1000
             z = target.position.z * 1000
 
-            # Check if this is a small move from the current position
-            c = self._coords()
-            is_small_move = False
-            if c:
-                dist = math.sqrt(
-                    (x - c[0]) ** 2 + (y - c[1]) ** 2 + (z - c[2]) ** 2
-                )
-                is_small_move = dist < self._DIRECT_MOVE_THRESHOLD_MM
-
-            if is_small_move:
-                return self._direct_move(target, x, y, z, c)
-
-            self.get_logger().info(
-                f'Target: [{x:.1f}, {y:.1f}, {z:.1f}] mm'
-            )
-
-            # Pre-flight is advisory — log results but never block.
-            # The Pro 450's built-in controller + collision mode is the
-            # real safety gate; the Python IK solver is too conservative.
-            passed, report, best_ik = self._preflight(x, y, z)
-            for line in report:
-                lvl = self.get_logger().info if passed else self.get_logger().warn
-                lvl(f'  preflight: {line}')
-
-            if not passed:
-                self.get_logger().warn(
-                    f'Pre-flight advisory FAILED — attempting move anyway '
-                    f'(hardware collision mode active)'
-                )
-
-            # ── step 1: joint-space home ─────────────────────────────────────
-            self._arm_status_pub.publish(String(data='homing'))
-            self.get_logger().info(f'Going to home: {self._home_angles}')
-            self._mc.send_angles(self._home_angles, self._speed)
-            time.sleep(0.35)
-            ok = self._wait_stop()
-            if not ok or self._force_stopped:
-                self.get_logger().error('Failed to reach home.')
-                self._arm_status_pub.publish(String(data='mechanical_error'))
-                return
-
-            self.get_logger().info('Home reached.')
             c = self._coords()
             if not c:
-                self.get_logger().error('Cannot read coords after homing.')
+                self.get_logger().error('Cannot read current coords.')
                 self._arm_status_pub.publish(String(data='mechanical_error'))
                 return
+
             rx, ry, rz = c[3], c[4], c[5]
+            dist = math.sqrt((x - c[0])**2 + (y - c[1])**2 + (z - c[2])**2)
 
-            self.get_logger().info(f'Moving to [{x:.1f}, {y:.1f}, {z:.1f}] mm')
-
-            if self._force_stopped:
-                self._arm_status_pub.publish(String(data='mechanical_error'))
-                return
-
-            # ── phase 1: lift to transit height ──────────────────────────────
-            if c[2] < self._transit_z:
-                lift = [c[0], c[1], self._transit_z, rx, ry, rz]
-                ok = self._linear_move(lift, tag='1-lift')
-                if not ok:
-                    self._arm_status_pub.publish(String(data='mechanical_error'))
-                    return
-                c = self._coords()
-                if c:
-                    rx, ry, rz = c[3], c[4], c[5]
+            self.get_logger().info(
+                f'Moving [{c[0]:.1f},{c[1]:.1f},{c[2]:.1f}] -> '
+                f'[{x:.1f},{y:.1f},{z:.1f}] mm  (dist={dist:.1f}mm)'
+            )
 
             if self._force_stopped:
                 self._arm_status_pub.publish(String(data='mechanical_error'))
                 return
 
-            # ── phase 2: horizontal travel ────────────────────────────────────
-            travel = [x, y, max(z, self._transit_z), rx, ry, rz]
-            ok = self._linear_move(travel, tag='2-travel')
-            if not ok:
-                self.get_logger().warn('Phase 2 travel failed — trying direct send_coords')
-                direct = [x, y, z, rx, ry, rz]
-                ok = self._linear_move(direct, tag='direct-fallback')
-                if not ok:
-                    self._arm_status_pub.publish(String(data='mechanical_error'))
-                    return
-                self._finish_move(target)
-                return
-            c = self._coords()
-            if c:
-                rx, ry, rz = c[3], c[4], c[5]
-
-            if self._force_stopped:
-                self._arm_status_pub.publish(String(data='mechanical_error'))
-                return
-
-            # ── phase 3: descend ─────────────────────────────────────────────
-            descent = [x, y, z, rx, ry, rz]
-            ok = self._linear_move(descent, tag='3-descend')
+            coords = [x, y, z, rx, ry, rz]
+            ok = self._linear_move(coords, tag='move')
             if not ok:
                 self._arm_status_pub.publish(String(data='mechanical_error'))
                 return
@@ -738,46 +631,6 @@ class ArmNode(Node):
                 return
 
             self._finish_move(target)
-
-    def _direct_move(self, target, x, y, z, c):
-        """
-        Direct moveL for small moves (e.g. calibration).
-        Skips homing and 3-phase — just sends a single linear command
-        from the current position to the target.  This preserves the
-        sub-millimetre accuracy that calibration depends on.
-        """
-        rx, ry, rz = c[3], c[4], c[5]
-        dist = math.sqrt((x - c[0])**2 + (y - c[1])**2 + (z - c[2])**2)
-        self.get_logger().info(
-            f'Direct moveL [{c[0]:.1f},{c[1]:.1f},{c[2]:.1f}] -> '
-            f'[{x:.1f},{y:.1f},{z:.1f}] mm  (delta={dist:.1f}mm)'
-        )
-
-        if self._force_stopped:
-            self._arm_status_pub.publish(String(data='mechanical_error'))
-            return
-
-        coords = [x, y, z, rx, ry, rz]
-        ok = self._linear_move(coords, tag='direct')
-        if not ok:
-            self._arm_status_pub.publish(String(data='mechanical_error'))
-            return
-
-        if self._force_stopped:
-            self._arm_status_pub.publish(String(data='mechanical_error'))
-            return
-
-        c_after = self._coords()
-        if c_after:
-            with self._pose_lock:
-                self._current_pose.pose.position.x = c_after[0] / 1000.0
-                self._current_pose.pose.position.y = c_after[1] / 1000.0
-                self._current_pose.pose.position.z = c_after[2] / 1000.0
-        else:
-            with self._pose_lock:
-                self._current_pose.pose = target
-        self._publish_current_pose()
-        self._arm_status_pub.publish(String(data='success'))
 
     def _finish_move(self, target):
         """Read actual coords after a move and publish success."""
