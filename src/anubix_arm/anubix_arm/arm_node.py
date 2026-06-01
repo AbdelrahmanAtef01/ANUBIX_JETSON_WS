@@ -500,11 +500,21 @@ class ArmNode(Node):
     # ═══════════════════════════════════════════════════════════════════════
 
     def _is_home_goal(self, target):
-        """Check if the resolved target matches the home position (within 5mm)."""
+        """
+        Detect home goals. Matches if:
+        - Target is within 5mm of the tracked home_xyz, OR
+        - Target XY radius < 30mm (J1 singularity zone — can only be
+          reached via joint-space homing, not Cartesian IK)
+        """
         dx = abs(target.position.x - self._home_xyz[0])
         dy = abs(target.position.y - self._home_xyz[1])
         dz = abs(target.position.z - self._home_xyz[2])
-        return dx < 0.005 and dy < 0.005 and dz < 0.005
+        near_home = dx < 0.005 and dy < 0.005 and dz < 0.005
+
+        xy_mm = math.hypot(target.position.x * 1000, target.position.y * 1000)
+        in_singularity = xy_mm < 30.0
+
+        return near_home or in_singularity
 
     def _on_arm_goal(self, msg: PoseStamped):
         if self._force_stopped:
