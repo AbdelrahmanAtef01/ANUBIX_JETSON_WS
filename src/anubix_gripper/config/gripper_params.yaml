@@ -1,0 +1,37 @@
+anubix_gripper:
+  ros__parameters:
+    # ── mode ─────────────────────────────────────────────────────────────
+    # true  = simulation (no USB hardware needed)
+    # false = real myGripperF100 via USB-RS485
+    simulate: false
+
+    # Simulation-only delay (seconds)
+    grip_sim_delay: 1.0
+
+    # ── hardware connection (USB-RS485) ──────────────────────────────────
+    # 'auto' = scan /dev/ttyACM* and /dev/ttyUSB* to find the gripper
+    # Or set a specific port like '/dev/ttyACM0' or '/dev/ttyUSB0'
+    gripper_port: 'auto'
+    gripper_baud: 115200
+    gripper_id: 14
+
+    # ── grip force & speed ───────────────────────────────────────────────
+    torque: 5              # grip force (1-100). Keep very low for leaves
+    close_speed: 2         # closing speed (1-100). Slow = more sensitive
+    open_speed: 20         # opening speed
+    release_speed: 2       # release speed (slow = gentle, won't fling leaf)
+
+    # ── leaf detection (position-based) ──────────────────────────────────
+    position_threshold: 1  # units of movement considered "stopped"
+    stable_readings: 3     # consecutive stable readings = confirmed stop
+    sample_interval: 0.15  # seconds between position samples
+    max_detect_time: 12.0  # max seconds to wait for detection
+    leaf_min_position: 1   # below this = fully closed = nothing detected
+    leaf_max_position: 99  # above this = barely moved
+
+    # ── retry ────────────────────────────────────────────────────────────
+    max_pick_tries: 5
+    retry_delay: 1.5       # seconds between retries
+
+    # ── status publishing ────────────────────────────────────────────────
+    status_interval: 0.5   # seconds between status publishes

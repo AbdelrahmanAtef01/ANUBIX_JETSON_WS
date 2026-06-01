@@ -13,6 +13,7 @@
   <exec_depend>anubix_navigation</exec_depend>
   <exec_depend>anubix_perception</exec_depend>
   <exec_depend>anubix_arm</exec_depend>
+  <exec_depend>anubix_gripper</exec_depend>
   <exec_depend>anubix_spectrometer</exec_depend>
 
   <export>

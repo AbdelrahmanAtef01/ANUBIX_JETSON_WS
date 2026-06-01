@@ -5,9 +5,8 @@ anubix_arm:
     # false = real Pro450 via pymycobot over Ethernet
     simulate: false
 
-    # Simulation-only delays (seconds)
+    # Simulation-only delay (seconds)
     arm_move_delay: 2.0
-    grip_delay: 1.0
 
     # ── home position ────────────────────────────────────────────────────
     # Cartesian (metres, base_link frame) — published as initial
@@ -33,10 +32,9 @@ anubix_arm:
     z_floor: 50.0          # mm — hard floor limit (emergency stop below)
     monitor_hz: 0.03       # Z-floor monitor poll interval (seconds)
 
-    # ── hardware connection ──────────────────────────────────────────────
+    # ── hardware connection (Ethernet) ───────────────────────────────────
     arm_host: '192.168.0.232'
     arm_port: 4500
     max_velocity_scaling: 0.5
     max_acceleration_scaling: 0.5
     force_threshold: 2.0
-    touch_sensor_topic: '/touch_sensor/data'

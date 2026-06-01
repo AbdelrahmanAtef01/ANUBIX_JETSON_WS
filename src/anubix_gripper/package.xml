@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>anubix_arm</name>
-  <version>2.0.0</version>
-  <description>ANUBIX Arm Control — MyCobot Pro 450 Elite</description>
+  <name>anubix_gripper</name>
+  <version>1.0.0</version>
+  <description>ANUBIX Gripper Control — myGripperF100 over USB-RS485</description>
   <maintainer email="anubix@example.com">ANUBIX Team</maintainer>
   <license>MIT</license>
 
@@ -11,7 +11,7 @@
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
-  <depend>geometry_msgs</depend>
+  <depend>std_srvs</depend>
 
   <export>
     <build_type>ament_python</build_type>

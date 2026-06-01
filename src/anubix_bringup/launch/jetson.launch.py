@@ -4,7 +4,8 @@ ANUBIX Jetson Launch
 =====================
 Launches the nodes that run on the Jetson Orin Nano:
   - anubix_master        (OmniLink AI agent bridge)
-  - anubix_arm           (arm control placeholder)
+  - anubix_arm           (arm control — MyCobot Pro 450 Elite via Ethernet)
+  - anubix_gripper       (gripper control — myGripperF100 via USB-RS485)
   - anubix_spectrometer  (spectral analysis)
   - anubix_vision        (YOLO leaf detection — RealSense + USB cameras)
   - anubix_jetson_bridge (cross-machine link monitor)
@@ -33,6 +34,7 @@ def generate_launch_description():
 
     master_share   = get_package_share_directory('anubix_master')
     arm_share      = get_package_share_directory('anubix_arm')
+    gripper_share  = get_package_share_directory('anubix_gripper')
     spectro_share  = get_package_share_directory('anubix_spectrometer')
     vision_share   = get_package_share_directory('anubix_vision')
     bridge_share   = get_package_share_directory('anubix_jetson_bridge')
@@ -53,6 +55,15 @@ def generate_launch_description():
         executable='arm_node',
         name='anubix_arm',
         parameters=[os.path.join(arm_share, 'config', 'arm_params.yaml')],
+        output='screen',
+        emulate_tty=True,
+    )
+
+    gripper_node = Node(
+        package='anubix_gripper',
+        executable='gripper_node',
+        name='anubix_gripper',
+        parameters=[os.path.join(gripper_share, 'config', 'gripper_params.yaml')],
         output='screen',
         emulate_tty=True,
     )
@@ -106,6 +117,7 @@ def generate_launch_description():
         simulate_arg,
         master_node,
         arm_node,
+        gripper_node,
         spectro_node,
         vision_node,
         bridge_node,
