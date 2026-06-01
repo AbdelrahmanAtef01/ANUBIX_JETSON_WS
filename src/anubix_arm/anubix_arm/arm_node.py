@@ -549,6 +549,14 @@ class ArmNode(Node):
             y = target.position.y * 1000
             z = target.position.z * 1000
 
+            # Check if small move — skip homing for calibration accuracy
+            with self._pose_lock:
+                cx = self._current_pose.pose.position.x * 1000
+                cy = self._current_pose.pose.position.y * 1000
+                cz = self._current_pose.pose.position.z * 1000
+            dist = math.sqrt((x - cx)**2 + (y - cy)**2 + (z - cz)**2)
+            is_small = dist < self._DIRECT_MOVE_THRESHOLD_MM
+
             self.get_logger().info('[SIM] Running pre-flight check...')
             passed, report = self._preflight_sim(x, y, z)
             for line in report:
@@ -558,24 +566,29 @@ class ArmNode(Node):
                 self._arm_status_pub.publish(String(data='preflight_failed'))
                 return
 
-            self.get_logger().info('[SIM] Going to home...')
-            self._arm_status_pub.publish(String(data='homing'))
-            time.sleep(self._arm_move_delay)
-            with self._pose_lock:
-                self._current_pose.pose.position.x = self._home_xyz[0]
-                self._current_pose.pose.position.y = self._home_xyz[1]
-                self._current_pose.pose.position.z = self._home_xyz[2]
-            self._publish_current_pose()
+            if is_small:
+                self.get_logger().info(
+                    f'[SIM] Direct move (delta={dist:.1f}mm) -> '
+                    f'({target.position.x:.4f}, {target.position.y:.4f}, {target.position.z:.4f})')
+                time.sleep(0.3)
+            else:
+                self.get_logger().info('[SIM] Going to home...')
+                self._arm_status_pub.publish(String(data='homing'))
+                time.sleep(self._arm_move_delay)
+                with self._pose_lock:
+                    self._current_pose.pose.position.x = self._home_xyz[0]
+                    self._current_pose.pose.position.y = self._home_xyz[1]
+                    self._current_pose.pose.position.z = self._home_xyz[2]
+                self._publish_current_pose()
 
-            if self._force_stopped:
-                self._arm_status_pub.publish(String(data='mechanical_error'))
-                return
+                if self._force_stopped:
+                    self._arm_status_pub.publish(String(data='mechanical_error'))
+                    return
 
-            self.get_logger().info(
-                f'[SIM] arm move -> '
-                f'({target.position.x:.3f}, {target.position.y:.3f}, {target.position.z:.3f})'
-            )
-            time.sleep(self._arm_move_delay)
+                self.get_logger().info(
+                    f'[SIM] arm move -> '
+                    f'({target.position.x:.3f}, {target.position.y:.3f}, {target.position.z:.3f})')
+                time.sleep(self._arm_move_delay)
 
             if self._force_stopped:
                 self._arm_status_pub.publish(String(data='mechanical_error'))
@@ -589,6 +602,12 @@ class ArmNode(Node):
     # ═══════════════════════════════════════════════════════════════════════
     #  REAL BACKEND
     # ═══════════════════════════════════════════════════════════════════════
+
+    # Small-move threshold (mm): if target is within this distance of the
+    # current position, do a direct moveL instead of the full home→3-phase
+    # cycle.  This is critical for calibration moves where accuracy matters
+    # more than collision avoidance over a long path.
+    _DIRECT_MOVE_THRESHOLD_MM = 50.0
 
     def _real_arm_move(self, goal: PoseStamped):
         with self._arm_lock:
@@ -608,6 +627,18 @@ class ArmNode(Node):
             x = target.position.x * 1000
             y = target.position.y * 1000
             z = target.position.z * 1000
+
+            # Check if this is a small move from the current position
+            c = self._coords()
+            is_small_move = False
+            if c:
+                dist = math.sqrt(
+                    (x - c[0]) ** 2 + (y - c[1]) ** 2 + (z - c[2]) ** 2
+                )
+                is_small_move = dist < self._DIRECT_MOVE_THRESHOLD_MM
+
+            if is_small_move:
+                return self._direct_move(target, x, y, z, c)
 
             self.get_logger().info(
                 f'Pre-flight for [{x:.1f}, {y:.1f}, {z:.1f}] mm ...'
@@ -693,10 +724,57 @@ class ArmNode(Node):
                 self._arm_status_pub.publish(String(data='mechanical_error'))
                 return
 
-            with self._pose_lock:
-                self._current_pose.pose = target
+            c_final = self._coords()
+            if c_final:
+                with self._pose_lock:
+                    self._current_pose.pose.position.x = c_final[0] / 1000.0
+                    self._current_pose.pose.position.y = c_final[1] / 1000.0
+                    self._current_pose.pose.position.z = c_final[2] / 1000.0
+            else:
+                with self._pose_lock:
+                    self._current_pose.pose = target
             self._publish_current_pose()
             self._arm_status_pub.publish(String(data='success'))
+
+    def _direct_move(self, target, x, y, z, c):
+        """
+        Direct moveL for small moves (e.g. calibration).
+        Skips homing and 3-phase — just sends a single linear command
+        from the current position to the target.  This preserves the
+        sub-millimetre accuracy that calibration depends on.
+        """
+        rx, ry, rz = c[3], c[4], c[5]
+        dist = math.sqrt((x - c[0])**2 + (y - c[1])**2 + (z - c[2])**2)
+        self.get_logger().info(
+            f'Direct moveL [{c[0]:.1f},{c[1]:.1f},{c[2]:.1f}] -> '
+            f'[{x:.1f},{y:.1f},{z:.1f}] mm  (delta={dist:.1f}mm)'
+        )
+
+        if self._force_stopped:
+            self._arm_status_pub.publish(String(data='mechanical_error'))
+            return
+
+        coords = [x, y, z, rx, ry, rz]
+        ok = self._linear_move(coords, tag='direct')
+        if not ok:
+            self._arm_status_pub.publish(String(data='mechanical_error'))
+            return
+
+        if self._force_stopped:
+            self._arm_status_pub.publish(String(data='mechanical_error'))
+            return
+
+        c_after = self._coords()
+        if c_after:
+            with self._pose_lock:
+                self._current_pose.pose.position.x = c_after[0] / 1000.0
+                self._current_pose.pose.position.y = c_after[1] / 1000.0
+                self._current_pose.pose.position.z = c_after[2] / 1000.0
+        else:
+            with self._pose_lock:
+                self._current_pose.pose = target
+        self._publish_current_pose()
+        self._arm_status_pub.publish(String(data='success'))
 
     # ═══════════════════════════════════════════════════════════════════════
     #  FRAME RESOLUTION
