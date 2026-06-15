@@ -104,6 +104,16 @@ class VisionNode(Node):
         # move by exactly this much to the right.
         self.declare_parameter('calibration_step_m', 0.01)
 
+        # Simulation mode — bypass YOLO model & camera hardware.
+        self.declare_parameter('simulate', False)
+        self.declare_parameter('sim_delay', 1.5)
+        self.declare_parameter('sim_cam1_x', 0.25)
+        self.declare_parameter('sim_cam1_y', -0.05)
+        self.declare_parameter('sim_cam1_z', 0.35)
+        self.declare_parameter('sim_cam2_x', 0.02)
+        self.declare_parameter('sim_cam2_y', -0.01)
+        self.declare_parameter('sim_cam2_z', 0.15)
+
         self._model_path = self.get_parameter('model_path').value
         self._confidence = float(self.get_parameter('confidence').value)
         self._usb_cam_index = int(self.get_parameter('usb_camera_index').value)
@@ -117,6 +127,19 @@ class VisionNode(Node):
         )
         self._tracking_max_dist = int(self.get_parameter('tracking_max_dist_px').value)
         self._calibration_step_m = float(self.get_parameter('calibration_step_m').value)
+
+        self._simulate = bool(self.get_parameter('simulate').value)
+        self._sim_delay = float(self.get_parameter('sim_delay').value)
+        self._sim_cam1 = (
+            float(self.get_parameter('sim_cam1_x').value),
+            float(self.get_parameter('sim_cam1_y').value),
+            float(self.get_parameter('sim_cam1_z').value),
+        )
+        self._sim_cam2 = (
+            float(self.get_parameter('sim_cam2_x').value),
+            float(self.get_parameter('sim_cam2_y').value),
+            float(self.get_parameter('sim_cam2_z').value),
+        )
 
         # State
         self._target_camera: int = 1
@@ -205,7 +228,7 @@ class VisionNode(Node):
         # Model is loaded on the worker thread so the CUDA/TensorRT context
         # is owned by the same thread that does inference. Wait for it here.
         self._model_ready.wait(timeout=60.0)
-        if self._model is None:
+        if not self._simulate and self._model is None:
             self.get_logger().error(
                 '[VISION] Model failed to load on worker thread!')
 
@@ -224,6 +247,14 @@ class VisionNode(Node):
         self.get_logger().info(
             f'  Gripper pixel (cam2 flange): {self._gripper_px_cam2} '
             f'(<0 = frame centre)')
+        self.get_logger().info(f'  Simulate: {self._simulate}')
+        if self._simulate:
+            self.get_logger().info(
+                f'  Sim cam1 point (m): {self._sim_cam1}')
+            self.get_logger().info(
+                f'  Sim cam2 offset (m): {self._sim_cam2}')
+            self.get_logger().info(
+                f'  Sim delay: {self._sim_delay}s')
         self.get_logger().info('=' * 60)
         self.get_logger().info('[VISION] Ready and waiting for goals.')
 
@@ -295,7 +326,7 @@ class VisionNode(Node):
         self.get_logger().info(
             f'[VISION] ========================================')
 
-        if self._model is None:
+        if not self._simulate and self._model is None:
             self.get_logger().error(
                 '[VISION] Model NOT loaded — publishing "not_found". '
                 'Check model_path parameter and TensorRT export.')
@@ -321,7 +352,8 @@ class VisionNode(Node):
         CUDA/TensorRT execution context is never destroyed between goals, and
         OpenCV HighGUI windows remain valid across runs.
         """
-        self._load_model()
+        if not self._simulate:
+            self._load_model()
         self._model_ready.set()
 
         while True:
@@ -338,9 +370,15 @@ class VisionNode(Node):
             start_time = time.time()
 
             if camera == 1:
-                self._run_realsense(task_type)
+                if self._simulate:
+                    self._run_realsense_sim(task_type)
+                else:
+                    self._run_realsense(task_type)
             elif camera == 2:
-                self._run_usb(task_type)
+                if self._simulate:
+                    self._run_usb_sim(task_type)
+                else:
+                    self._run_usb(task_type)
             else:
                 self.get_logger().error(
                     f'[VISION] Unknown camera index: {camera}. '
@@ -549,6 +587,35 @@ class VisionNode(Node):
                 pass
             self._close_windows()
 
+    # Camera 1 simulation
+
+    def _run_realsense_sim(self, task_type: str):
+        self.get_logger().info(
+            '[VISION] [SIM] Starting RealSense pipeline (simulated)...')
+        time.sleep(self._sim_delay)
+
+        if self._force_stopped:
+            self.get_logger().warning(
+                '[VISION] Force stopped during simulated RealSense capture')
+            self._pub_status.publish(String(data='not_found'))
+            return
+
+        x_m, y_m, z_m = self._sim_cam1
+        self.get_logger().info(
+            f'[VISION] [SIM] TARGET LEAF FOUND! '
+            f'3D=({x_m:.4f}, {y_m:.4f}, {z_m:.4f}) m')
+
+        pose = Pose()
+        pose.position.x = x_m
+        pose.position.y = y_m
+        pose.position.z = z_m
+        pose.orientation.w = 1.0
+        self._pub_pose.publish(pose)
+        self._pub_status.publish(String(data='found'))
+        self.get_logger().info(
+            '[VISION] Published /perception/target_pose and '
+            '/perception/status="found"')
+
     # Camera 2: USB flange — closest leaf to gripper, then re-identify
 
     def _run_usb(self, task_type: str):
@@ -723,6 +790,85 @@ class VisionNode(Node):
             cap.release()
             self.get_logger().info('[VISION] USB camera released')
             self._close_windows()
+
+    # Camera 2 simulation
+
+    def _run_usb_sim(self, task_type: str):
+        self.get_logger().info(
+            f'[VISION] [SIM] Opening USB camera (simulated)...')
+
+        # Phase 1: simulated closest-leaf detection
+        self.get_logger().info(
+            '[VISION] === USB Phase 1: closest-leaf-to-gripper ===')
+        time.sleep(self._sim_delay)
+
+        if self._force_stopped:
+            self.get_logger().warning(
+                '[VISION] Force stopped during simulated Phase 1')
+            self._pub_status.publish(String(data='not_found'))
+            return
+
+        self.get_logger().info(
+            '[VISION] [SIM] Phase 1 COMPLETE — simulated leaf detected '
+            '(took 1 attempts)')
+
+        # Arm calibration move — real interaction with the arm node.
+        # This publishes /supervisor/arm_nav_goal and waits for
+        # /arm/arm_status exactly like the real pipeline.
+        if not self._send_calibration_arm_goal():
+            self._pub_status.publish(String(data='not_found'))
+            return
+
+        self.get_logger().info(
+            f'[VISION] Waiting for /arm/arm_status '
+            f'(timeout={self._arm_timeout}s)...')
+        if not self._arm_event.wait(timeout=self._arm_timeout):
+            self._waiting_for_arm = False
+            self.get_logger().error(
+                '[VISION] Arm move TIMED OUT — calibration failed!')
+            self._pub_status.publish(String(data='not_found'))
+            return
+
+        if self._force_stopped:
+            self.get_logger().warning(
+                '[VISION] Force stopped after arm move')
+            self._pub_status.publish(String(data='not_found'))
+            return
+
+        self.get_logger().info(
+            '[VISION] Arm move confirmed — proceeding to Phase 2')
+
+        # Phase 2: simulated re-identification
+        self.get_logger().info(
+            '[VISION] === USB Phase 2: re-identify same leaf ===')
+        time.sleep(self._sim_delay)
+
+        if self._force_stopped:
+            self.get_logger().warning(
+                '[VISION] Force stopped during simulated Phase 2')
+            self._pub_status.publish(String(data='not_found'))
+            return
+
+        self.get_logger().info(
+            '[VISION] [SIM] Phase 2 COMPLETE — simulated leaf re-identified '
+            '(match_dist=0.0px, attempt=1)')
+
+        dx_m, dy_m, dz_m = self._sim_cam2
+        self.get_logger().info(
+            f'[VISION] [SIM] Simulated offset: '
+            f'dx={dx_m * 100:.2f}cm  dy={dy_m * 100:.2f}cm  '
+            f'dz={dz_m * 100:.2f}cm')
+
+        pose = Pose()
+        pose.position.x = dx_m
+        pose.position.y = dy_m
+        pose.position.z = dz_m
+        pose.orientation.w = 1.0
+        self._pub_pose.publish(pose)
+        self._pub_status.publish(String(data='found'))
+        self.get_logger().info(
+            '[VISION] Published /perception/target_pose and '
+            '/perception/status="found"')
 
     def _detect_phase1(self, cap, w, h, gx, gy, task_type):
         deadline = time.time() + self._detection_timeout

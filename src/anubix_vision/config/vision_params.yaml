@@ -37,3 +37,26 @@ anubix_vision:
     # Camera 2: calibration step the arm is asked to perform on +X to
     # establish px-per-cm. 0.01 m = 1 cm.
     calibration_step_m: 0.01
+
+    # ── Simulation mode ─────────────────────────────────────────────────
+    # true  = skip YOLO model & cameras; publish fixed points below.
+    #         The full pipeline still runs: same topics, same logs, same
+    #         arm calibration move (camera 2). Useful when cameras or the
+    #         TensorRT model are unavailable.
+    # false = real cameras + YOLO inference (production mode).
+    simulate: false
+
+    # Simulated processing delay (seconds) — mimics inference time.
+    sim_delay: 1.5
+
+    # Camera 1 (RealSense) simulated result — absolute 3D in base_link
+    # frame (metres). Published as /perception/target_pose.
+    sim_cam1_x: 0.25
+    sim_cam1_y: -0.05
+    sim_cam1_z: 0.35
+
+    # Camera 2 (USB flange) simulated result — relative offset from
+    # gripper (metres). Published as /perception/target_pose.
+    sim_cam2_x: 0.02
+    sim_cam2_y: -0.01
+    sim_cam2_z: 0.15
