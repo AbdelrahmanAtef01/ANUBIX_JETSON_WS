@@ -1,281 +1,186 @@
-<p align="center">
-  <img src="docs/assets/anubix_banner.png" alt="ANUBIX Banner" width="100%"/>
-</p>
+<div align="center">
 
-<h1 align="center">ANUBIX</h1>
+<img src="docs/assets/anubix_logo_1.png" alt="ANUBIX Robot" width="500"/>
 
-<h3 align="center">
-  Autonomous AI-Driven Agricultural Robot for Precision Plant Diagnostics
-</h3>
+# ANUBIX
 
-<p align="center">
-  <em>Graduation Project &mdash; Faculty of Computers and Artificial Intelligence, Cairo University (2025&ndash;2026)</em>
-</p>
+### Autonomous Robot for Early-Stage Agricultural Disease Detection
 
-<p align="center">
-  <a href="#architecture"><strong>Architecture</strong></a> &bull;
-  <a href="#ros-2-packages"><strong>Packages</strong></a> &bull;
-  <a href="#hardware"><strong>Hardware</strong></a> &bull;
-  <a href="#getting-started"><strong>Getting Started</strong></a> &bull;
-  <a href="#demo-videos"><strong>Demos</strong></a> &bull;
-  <a href="#team"><strong>Team</strong></a>
-</p>
+**Detecting crop diseases *before* visual symptoms appear — using spectroscopy, AI, and robotics.**
 
-<p align="center">
-  <img alt="ROS 2 Humble" src="https://img.shields.io/badge/ROS_2-Humble-blue?style=for-the-badge&logo=ros"/>
-  <img alt="Python 3.10+" src="https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white"/>
-  <img alt="Jetson Orin Nano" src="https://img.shields.io/badge/Jetson-Orin_Nano-76B900?style=for-the-badge&logo=nvidia&logoColor=white"/>
-  <img alt="YOLO v8" src="https://img.shields.io/badge/YOLO-v8_Segmentation-FF6F00?style=for-the-badge"/>
-  <img alt="License" src="https://img.shields.io/badge/License-Academic-lightgrey?style=for-the-badge"/>
-</p>
+*Graduation Project — Benha University, Shoubra Faculty of Engineering*
+*Communications & Computer Engineering Program (CCEP)*
+*June 2026*
+
+[![ROS 2](https://img.shields.io/badge/ROS_2-Humble-blue?logo=ros)](https://docs.ros.org/en/humble/)
+[![Platform](https://img.shields.io/badge/Platform-Jetson_Orin_Nano-green?logo=nvidia)](https://developer.nvidia.com/embedded/jetson-orin-nano)
+[![AI](https://img.shields.io/badge/AI_Agent-OmniLink_+_Gemini-orange)](https://omnilink.ai)
+[![License](https://img.shields.io/badge/License-Academic-lightgrey)]()
 
 ---
 
-## Overview
+</div>
 
-**ANUBIX** is a fully autonomous agricultural robot that navigates to crop locations, visually identifies diseased or stressed leaves using AI-powered computer vision, physically samples them with a robotic arm and gripper, performs near-infrared spectral analysis, and uploads diagnostic results to the cloud &mdash; all orchestrated by a natural-language AI agent that a farmer can command from a web interface.
+## What is ANUBIX?
 
-The system combines **9 ROS 2 packages** running across a Jetson Orin Nano and Raspberry Pi, coordinated through a multi-subsystem supervisor architecture with real-time feedback loops, emergency stop propagation, and automatic failure recovery.
+Plant diseases spread silently. By the time a farmer sees yellowing leaves or wilting stems, the virus has already spread to neighboring plants — and the economic damage is done.
 
-### Key Capabilities
+**ANUBIX changes that.** It's an autonomous mobile robot that can detect crop diseases *before any visible symptoms appear*. Instead of relying on cameras to spot what the human eye can already see, ANUBIX uses **near-infrared (NIR) spectroscopy** to look *inside* the plant tissue and catch the invisible biochemical markers of infection.
 
-| Capability | Description |
+A farmer simply types a command — in Arabic or English — like *"Scan the tomatoes in Aisle 3"*, and ANUBIX handles everything autonomously: navigating to the target, identifying leaves through dense foliage, gently grasping them with a robotic arm, and performing a spectral scan that reveals whether the plant is healthy or carrying a hidden infection.
+
+<div align="center">
+<img src="docs/assets/robot_real_3.jpeg" alt="Team collecting spectral data at Si-Ware Systems" width="700"/>
+
+*The team collecting spectral readings from tomato plant samples using the SI-NIR spectrometer*
+</div>
+
+---
+
+## Why It Matters
+
+Current agricultural monitoring falls short in three critical ways:
+
+| Existing Approach | The Problem |
 |---|---|
-| **AI Agent Control** | Natural-language commands via OmniLink web UI &rarr; structured tool calls &rarr; hardware execution |
-| **Autonomous Navigation** | GPS/map-based navigation to specific crop coordinates with vision-standoff mode |
-| **Dual-Camera Vision** | Camera 1 (Intel RealSense, 3D depth) for target identification + Camera 2 (USB flange-mounted) for precision parallax calibration |
-| **YOLO Segmentation** | YOLOv8 instance segmentation distinguishes healthy vs. diseased leaves with intelligent target selection |
-| **6-DOF Robotic Arm** | MyCobot Pro 450 Elite with DH-based forward kinematics, capsule self-collision checking, and multi-seed IK solving |
-| **Adaptive Gripper** | Elephant Robotics myGripperF100 with position-monitoring leaf detection and multi-retry pick sequences |
-| **NIR Spectroscopy** | Si-NIR sensor for molecular-level plant health analysis with remote ML inference |
-| **Cloud Integration** | Supabase for data persistence + photo upload &bull; OmniLink for AI agent hosting |
-| **Safety Systems** | Z-floor monitoring, force-stop propagation, hardware collision detection, pre-flight workspace validation |
+| **Drones & RGB Cameras** | Too late — they only detect *visible* symptoms after the virus has already spread |
+| **Handheld Spectrometers** | Lab-grade accuracy, but manually sampling thousands of plants is economically unviable |
+| **Fixed Sensor Arrays** | Require installing thousands of units — exorbitant cost makes facility-wide coverage impossible |
+
+**ANUBIX combines the best of all three**: the mobility of a drone, the lab-grade biochemical analysis of a spectrometer, and the autonomy of a fixed system — all in one intelligent robot that a farmer can command in plain language.
 
 ---
 
-## Architecture
+## How It Works
+
+Every inspection mission follows an autonomous sequence — orchestrated by an AI agent that breaks down the farmer's natural language command into structured robotic actions:
 
 ```
-                    ┌─────────────────────────────────────┐
-                    │        OmniLink Web UI (Cloud)       │
-                    │   User sends natural-language task    │
-                    └──────────────┬───────────────────────┘
-                                   │ HTTP POST (tool calls)
-                                   ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                    JETSON ORIN NANO                                   │
-│                                                                      │
-│  ┌──────────────┐    /supervisor/*     ┌──────────────────────────┐  │
-│  │ Master Node  │──────────────────────│  Navigation Node         │  │
-│  │ (AI Bridge)  │                      │  (Nav2 / Simulated)      │  │
-│  │              │                      └──────────────────────────┘  │
-│  │ HTTP Server  │    /supervisor/*     ┌──────────────────────────┐  │
-│  │ :5055        │──────────────────────│  Vision Node             │  │
-│  │              │                      │  YOLO + RealSense + USB  │  │
-│  │ OmniLink     │                      │  TensorRT / CUDA         │  │
-│  │ Agent Profile│                      └──────────────────────────┘  │
-│  │              │    /supervisor/*     ┌──────────────────────────┐  │
-│  │ Tool Callback│──────────────────────│  Arm Node                │  │
-│  │ Handler      │                      │  Pro 450 + IK + Collision│  │
-│  │              │                      └──────────────────────────┘  │
-│  │              │    /supervisor/*     ┌──────────────────────────┐  │
-│  │              │──────────────────────│  Gripper Node            │  │
-│  │              │                      │  myGripperF100 RS485     │  │
-│  │              │                      └──────────────────────────┘  │
-│  │              │    /supervisor/*     ┌──────────────────────────┐  │
-│  │              │──────────────────────│  Spectrometer Node       │  │
-│  │              │                      │  Si-NIR TCP/IP + ML      │  │
-│  └──────────────┘                      └──────────────────────────┘  │
-│                                                                      │
-│  ┌──────────────┐                      ┌──────────────────────────┐  │
-│  │ Jetson Bridge│                      │  Supabase Uploader       │  │
-│  │ (Link Monitor│                      │  Photos + Readings       │  │
-│  └──────────────┘                      └──────────────────────────┘  │
-│                                                                      │
-└──────────────────────────────────────────────────────────────────────┘
-                    │
-                    │ Ethernet (CycloneDDS)
-                    ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                    RASPBERRY PI (Future)                              │
-│                                                                      │
-│  ┌──────────────┐    ┌──────────────┐    ┌────────────────────────┐  │
-│  │  RPi Bridge  │    │  Nav2 Stack  │    │  Motor Controllers    │  │
-│  │  (Heartbeat) │    │  (SLAM/LIDAR)│    │  (Drive Base)         │  │
-│  └──────────────┘    └──────────────┘    └────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────────┘
+  Farmer types: "Scan the lower leaves in Aisle 3 for mosaic virus"
+                                    |
+                    ┌───────────────┼───────────────┐
+                    v               v               v
+              1. NAVIGATE      2. PERCEIVE     3. MANIPULATE
+              Drive to the     Use AI vision   Extend the 6-DOF
+              target aisle     to find and     arm, gently grasp
+              autonomously     locate leaves   the target leaf
+                    |               |               |
+                    └───────────────┼───────────────┘
+                                    v
+                            4. SCAN & DIAGNOSE
+                            Place the NIR spectrometer
+                            against the leaf tissue
+                                    |
+                                    v
+                         5. REPORT RESULTS
+                         Upload diagnosis + photo
+                         to the cloud dashboard
 ```
 
-### Communication Topology
+The AI agent handles failure recovery automatically — if the gripper slips, it retries. If a path is blocked, it replans. If perception fails at close range, it continues anyway because *the spectrometer is the real diagnostic tool, not the camera*.
 
-All inter-node communication uses **ROS 2 Humble** topics with carefully configured QoS profiles:
+<div align="center">
+<img src="docs/assets/demo_photos_1.jpeg" alt="Field testing the spectrometer" width="700"/>
 
-| Topic Pattern | QoS | Purpose |
-|---|---|---|
-| `/supervisor/*` | RELIABLE + TRANSIENT_LOCAL | Commands from master to subsystems |
-| `/nav/status` | RELIABLE + VOLATILE | Navigation feedback |
-| `/perception/status` | RELIABLE + VOLATILE | Vision pipeline results |
-| `/arm/arm_status` | RELIABLE + VOLATILE | Arm movement feedback |
-| `/arm/gripper_status` | RELIABLE + VOLATILE | Gripper operation feedback |
-| `/spectrometer/status` | RELIABLE + VOLATILE | Spectral analysis status |
-| `/supervisor/force_stop` | RELIABLE + VOLATILE | Emergency stop (edge-triggered) |
+*Field testing: the SI-NIR spectrometer scanning plant samples with real-time data acquisition*
+</div>
 
 ---
 
-## ROS 2 Packages
+## System Architecture
 
-The workspace contains **9 packages**, each handling a distinct subsystem:
+ANUBIX is built as a distributed ROS 2 system spanning two computers — an **NVIDIA Jetson Orin Nano** (AI inference + perception) and a **Raspberry Pi** (navigation + motor control) — connected over CycloneDDS.
 
-### `anubix_master` &mdash; AI Agent Bridge & Mission Orchestrator
+<div align="center">
+<img src="docs/assets/architecture_overview.jpeg" alt="ANUBIX System Architecture" width="800"/>
 
-The central coordinator. Runs an HTTP server (port 5055) that receives structured tool calls from the OmniLink AI agent and translates them into ROS 2 supervisor commands. Manages the 11-step execution sequence for each agricultural task:
+*High-level system architecture showing the seven interconnected stacks*
+</div>
 
-1. Set robot/task context IDs
-2. Navigate to target (vision standoff mode)
-3. Initial perception (Camera 1, wide-angle)
-4. Complete navigation (drive to target)
-5. Move arm to initial position
-6. Precision perception (Camera 2, telephoto)
-7. Move arm to grip position
-8. Grip the leaf
-9. Spectrometer scan
-10. Release
-11. Retract arm to home
+### The Seven Stacks
 
-### `anubix_vision` &mdash; YOLO-Powered Leaf Detection
-
-Dual-camera computer vision pipeline running on CUDA/TensorRT:
-
-- **Camera 1 (Intel RealSense D400 series)**: 3D depth-based target localization with intelligent scoring that prefers unhealthy leaves in the top-third Y zone and left hemisphere
-- **Camera 2 (USB flange-mounted)**: Two-phase parallax calibration &mdash; detects the closest leaf to the gripper, commands a 1cm arm calibration move, re-identifies the same leaf via nearest-centroid matching, and computes X/Y/Z offsets from pixel displacement
-
-### `anubix_arm` &mdash; Robotic Arm Control
-
-Full control stack for the **MyCobot Pro 450 Elite**:
-
-- Modified DH forward kinematics (6-DOF)
-- Capsule-based self-collision checking across all non-adjacent link pairs
-- Multi-seed inverse kinematics with collision-aware solution selection
-- Z-floor monitoring thread (emergency stop if Z breaches floor)
-- Pre-flight workspace validation
-- Direct Cartesian movement via `send_coords`
-
-### `anubix_gripper` &mdash; Adaptive Leaf Gripper
-
-Controls the **myGripperF100** via USB-RS485 (Modbus RTU):
-
-- Position-monitoring leaf detection (ultra-sensitive, tracks stable readings)
-- Multi-retry pick sequences with configurable torque and speed
-- Dual interface: supervisor bridge (for master node) + direct topic/service control
-- Auto-detection of USB serial port
-
-### `anubix_spectrometer` &mdash; NIR Spectral Analysis
-
-Interface to the **Si-NIR sensor** over dual TCP/IP sockets:
-
-- 5-scan acquisition with mean averaging
-- Background calibration (division-based, bg.csv reference)
-- Remote ML inference server for disease classification
-- Byte-exact reproduction of the reference `pyConnect` pipeline
-
-### `anubix_navigation` &mdash; Autonomous Navigation
-
-Navigation stack with vision-standoff capability:
-
-- Configurable standoff distance for camera-first approach
-- Preemption support (new goal cancels current navigation)
-- Integration point for Nav2 action server
-
-### `anubix_supabase` &mdash; Cloud Data Pipeline
-
-Automated data upload triggered by successful spectrometer readings:
-
-- Photo capture from USB camera
-- Image upload to Supabase Storage
-- Structured reading insertion (ReadingModel) with robot/task IDs
-- Retry logic with configurable attempts
-
-### `anubix_jetson_bridge` &mdash; Cross-Machine Link Monitor
-
-Maintains the Jetson-RPi communication link:
-
-- 1 Hz bidirectional heartbeat
-- Connection loss detection with configurable timeout
-- Command and feedback logging for traceability
-- Statistics tracking
-
-### `anubix_bringup` &mdash; System Launch
-
-Single-command launch for the entire Jetson stack:
-
-```bash
-ros2 launch anubix_bringup jetson.launch.py                    # simulation mode
-ros2 launch anubix_bringup jetson.launch.py simulate:=false     # hardware mode
-```
+| Stack | What It Does |
+|---|---|
+| **Master (Brain)** | Bridges the cloud AI agent to every hardware subsystem. Receives tool calls from OmniLink/Gemini, dispatches them as ROS 2 commands, and returns structured feedback. |
+| **Navigation** | Fuses 2D LIDAR, wheel odometry, and IMU data via SLAM. Plans collision-free routes through greenhouse aisles using Nav2. |
+| **Perception** | Runs YOLOv8 instance segmentation on the Jetson GPU to locate leaves in dense foliage. Dual cameras provide 3D coordinates for the arm. |
+| **Arm Control** | Controls the MyCobot Pro 450 (6-DOF) with custom DH kinematics. Threads the arm through foliage to place the spectrometer precisely on the leaf. |
+| **Gripper** | Manages the myGripperF100 end-effector. Position-monitoring detects when a leaf is successfully grasped. |
+| **Spectrometer** | Drives the SI-NIR sensor via TCP, captures spectral reflectance data, and sends it to a cloud-hosted SVM model that classifies the plant's health status. |
+| **Cloud** | Uploads scan results, diagnosis, and photos to Supabase for the web dashboard. |
 
 ---
 
-## Hardware
+## Technology Deep Dive
 
-### Bill of Materials
+### The AI Brain — LLM Task Planning
 
-| Component | Model | Role | Interface |
-|---|---|---|---|
-| **Compute (Primary)** | NVIDIA Jetson Orin Nano | Vision inference, arm control, master node | &mdash; |
-| **Compute (Navigation)** | Raspberry Pi 4 | Nav2, motor control, LIDAR processing | Ethernet to Jetson |
-| **Robotic Arm** | MyCobot Pro 450 Elite | 6-DOF manipulation, leaf sampling | Ethernet (TCP 4500) |
-| **Gripper** | Elephant Robotics myGripperF100 | Leaf gripping with force sensing | USB-RS485 (Modbus RTU) |
-| **Depth Camera** | Intel RealSense D400 series | 3D leaf localization (Camera 1) | USB 3.0 |
-| **Flange Camera** | USB Webcam | Precision parallax calibration (Camera 2) | USB 2.0 |
-| **Spectrometer** | Si-NIR Sensor | Near-infrared spectral analysis | USB-Ethernet (TCP 5000/5001) |
-| **Drive Base** | Custom differential drive | Mobile platform navigation | RPi GPIO / CAN |
+ANUBIX doesn't run a fixed script. A cloud-hosted **Google Gemini** model (via OmniLink Agents) acts as the robot's cognitive engine. It receives natural language commands, decomposes them into a strict 12-step execution sequence, and dispatches structured tool calls to the robot's hardware.
 
-### Network Configuration
+Key innovations:
+- **Phase Discriminators** — prevent the LLM from collapsing repeated tool calls with identical arguments
+- **Nudge Mechanism** — automatically recovers when the model emits narration without a tool call
+- **Emergency Bypass** — detects keywords like "stop" or "abort" and bypasses the command queue for immediate halt
+- **Custom API Client** — built to bypass OmniLink's broken API callback, with SSH tunneling over Tailscale VPN
 
-```
-Jetson Orin Nano ─── 192.168.0.100  ──┐
-MyCobot Pro 450  ─── 192.168.0.232  ──┤── Ethernet Switch
-Raspberry Pi     ─── 192.168.10.2   ──┘
-Si-NIR Sensor    ─── 192.168.137.2  ──── USB-Ethernet Gadget (direct)
-```
+### Perception — Seeing Through the Canopy
+
+The vision system uses a **dual-camera strategy**:
+
+1. **Intel RealSense D435i** (wide-angle, depth) — initial scan to locate leaves and compute 3D coordinates via stereo depth
+2. **USB Flange Camera** (mounted on the arm) — precision close-range targeting using parallax-based depth estimation
+
+A **YOLOv8m-seg** model (TensorRT FP16 optimized) runs real-time instance segmentation, detecting four classes: healthy leaves, unhealthy leaves, green tomatoes, and ripened tomatoes. The model was trained on 2,500+ images including a custom hand-annotated dataset.
+
+> **Important**: YOLO is used for *leaf localization*, not disease detection. The camera finds the leaf — the spectrometer diagnoses it.
+
+### Spectroscopy — Looking Inside the Plant
+
+This is the core innovation. The **SI-NIR spectrometer** (by Si-Ware Systems) captures near-infrared reflectance across 1400-2500 nm wavelengths. At this range, the light penetrates plant tissue and reveals biochemical markers — changes in chlorophyll, water content, and cellular structure — that indicate viral infection *days or weeks before any visible symptoms*.
+
+The spectral data is processed through:
+1. **Savitzky-Golay filtering** and advanced preprocessing
+2. **PCA dimensionality reduction** 
+3. **SVM classification** — trained on 3,200+ spectral readings collected by the team
+
+The model classifies plants as Healthy, Early-Stage Infection, or Diseased — giving farmers an early warning system to isolate and treat before outbreaks spread.
+
+<div align="center">
+<img src="docs/assets/gallery_5.jpeg" alt="Spectrometer field setup" width="600"/>
+
+*The SI-NIR spectrometer connected to the Jetson for field data collection*
+</div>
+
+### Arm Control — Precision in Dense Foliage
+
+The **MyCobot Pro 450 Elite** (6-DOF, harmonic drive) is controlled through custom forward/inverse kinematics using Denavit-Hartenberg parameters. The arm navigates through dense plant canopies with:
+
+- Capsule-based self-collision checking
+- Real-time Z-axis floor monitoring
+- Layered safety architecture (software limits, collision detection, emergency stop)
+- Multi-phase trajectory planning (standoff, approach, grasp, retract)
 
 ---
 
-## The 11-Step Execution Sequence
+## Repository Structure
 
-Each agricultural task follows a precise, AI-orchestrated sequence with built-in failure recovery:
+This workspace contains **9 ROS 2 packages**:
 
 ```
-  Step 1: Set Context ──────────────────── robot_id + task_id
-       │
-  Step 2: Navigate (Standoff) ──────────── stop 1m short, vision=true
-       │
-  Step 3: Initial Perception ───────────── Camera 1 (RealSense, 3D)
-       │                                   YOLO segmentation → target leaf
-       │
-  Step 4: Navigate (Final) ─────────────── drive all the way, vision=false
-       │
-  Step 5: Arm → Initial Position ───────── move to Camera 1 target
-       │
-  Step 6: Precision Perception ─────────── Camera 2 (USB, parallax)
-       │                                   re-identify leaf → XYZ offset
-       │
-  Step 7: Arm → Grip Position ─────────── move to refined target
-       │
-  Step 8: Grip ─────────────────────────── close gripper, detect leaf
-       │                                   up to 5 retry attempts
-       │
-  Step 9: Spectrometer Scan ────────────── 5× NIR readings → mean → ML
-       │                                   → disease classification
-       │
-  Step 10: Release ─────────────────────── open gripper gently
-       │
-  Step 11: Retract ─────────────────────── arm → home position
-       │
-  Step 12: Next Task or Go Home ────────── queue management
+anubix_ws/
+├── src/
+│   ├── anubix_master/          # Central brain — AI agent <-> ROS 2 bridge
+│   ├── anubix_navigation/      # SLAM, path planning, waypoint navigation
+│   ├── anubix_vision/          # YOLOv8 perception, dual-camera pipeline
+│   ├── anubix_arm/             # MyCobot Pro 450 kinematics & control
+│   ├── anubix_gripper/         # myGripperF100 end-effector control
+│   ├── anubix_spectrometer/    # SI-NIR driver, spectral data + ML inference
+│   ├── anubix_supabase/        # Cloud upload (results, photos, diagnosis)
+│   ├── anubix_jetson_bridge/   # Cross-device link monitor (Jetson <-> RPi)
+│   └── anubix_bringup/         # Launch files for full system startup
+├── agent_config/               # AI agent prompt & tool definitions
+└── docs/assets/                # Project images
 ```
-
-**Failure Recovery**: Every step has a defined recovery protocol &mdash; blocked navigation triggers retry then skip, perception failure on Camera 1 skips the plant, perception failure on Camera 2 continues (the arm is close enough), grip failure retries up to 3 times with re-perception, mechanical errors trigger emergency stop.
 
 ---
 
@@ -283,274 +188,88 @@ Each agricultural task follows a precise, AI-orchestrated sequence with built-in
 
 ### Prerequisites
 
-- **NVIDIA Jetson Orin Nano** with JetPack 5.x+
-- **ROS 2 Humble** (Ubuntu 22.04)
-- **Python 3.10+**
-- **CUDA** + **TensorRT** (for YOLO inference)
+- **Hardware**: NVIDIA Jetson Orin Nano (8GB), Raspberry Pi 4, MyCobot Pro 450, SI-NIR Spectrometer, Intel RealSense D435i
+- **Software**: Ubuntu 22.04, ROS 2 Humble, Python 3.10+
 
-### Installation
+### Build
 
 ```bash
-# Clone the workspace
-git clone https://github.com/AbdelrahmanAtef01/ANUBIX_JETSON_WS.git
-cd ANUBIX_JETSON_WS
-
-# Install Python dependencies
-pip3 install omnilink pymycobot ultralytics opencv-python pyrealsense2 requests numpy supabase
-
-# Build the ROS 2 workspace
+cd anubix_ws
 colcon build --symlink-install
 source install/setup.bash
-```
-
-### Export the YOLO Model for TensorRT
-
-```bash
-yolo export model=best.pt format=engine half=true
-# Place the resulting best.engine in the workspace root
-```
-
-### Environment Variables
-
-```bash
-export OMNI_KEY="olink_YOUR_KEY_HERE"        # OmniLink API key
-export SUPABASE_URL="https://your-project.supabase.co"
-export SUPABASE_KEY="your-anon-key"
 ```
 
 ### Launch
 
 ```bash
-# Simulation mode (no hardware required)
+# Full system launch on the Jetson
 ros2 launch anubix_bringup jetson.launch.py
-
-# Hardware mode (all devices connected)
-ros2 launch anubix_bringup jetson.launch.py simulate:=false
-
-# Individual nodes
-ros2 run anubix_arm arm_node
-ros2 run anubix_vision vision_node
-ros2 run anubix_gripper gripper_node
-ros2 run anubix_spectrometer spectrometer_node
-```
-
-### Using the AI Agent
-
-1. Launch the system (master node starts the HTTP server on port 5055)
-2. Set up an SSH tunnel if accessing remotely: `ssh -L 5055:localhost:5055 user@jetson-ip`
-3. Open the **OmniLink Web UI** and select the **ANUBIX** agent
-4. Send a task in natural language:
-   ```
-   Check for disease at coordinates (40, 45) using
-   robot_id=34a957fd-d45c-4dbf-8e02-be8e1b5e349a
-   task_id=40e4060b-5bc8-4044-9d71-046fee27a757
-   ```
-5. Watch the AI agent orchestrate the full 11-step sequence automatically
-
-### Arm Mission Test
-
-```bash
-# Test all arm reachability points
-ros2 run anubix_arm mission
-
-# Test specific points (historically problematic collision zones)
-ros2 run anubix_arm mission -- 3 6 7
 ```
 
 ---
 
-## Demo Videos
+## The Team
 
-### Camera 1 &mdash; RealSense Target Selection
+<div align="center">
+<img src="docs/assets/squad_photo_1.jpeg" alt="The ANUBIX Team" width="700"/>
 
-The base-mounted Intel RealSense camera performs YOLO instance segmentation to identify and score leaves. The algorithm prefers unhealthy leaves (disease detection priority), applies Y-zone penalties, and uses hemisphere preference for optimal gripper approach.
+*The ANUBIX squad during one of many late-night sessions*
+</div>
 
-https://github.com/user-attachments/assets/camera1_realsense_demo.mp4
+<br>
 
-> **Video**: `demo_output/camera1_realsense_demo.mp4` &mdash; Shows YOLO segmentation masks, hemisphere selection (left preferred), Y-zone penalty bands, per-leaf scoring breakdown, and target lock.
+<div align="center">
 
-### Camera 2 &mdash; USB Flange Parallax Calibration
+| | | |
+|:---:|:---:|:---:|
+| **Abdelrahman Atef** | **Andrew Ayman** | **Ahmed Abdelwahed** |
+| **Hanin Sherif** | **Hazem Abuelanin** | **Mohamed Hany** |
 
-The flange-mounted USB camera performs a two-phase precision calibration. Phase 1 identifies the closest leaf to the gripper. The arm then moves 1cm right for calibration. Phase 2 re-identifies the same leaf and computes pixel-to-centimeter scale, XY offsets, and Z depth via vertical parallax disparity.
+</div>
 
-https://github.com/user-attachments/assets/camera2_usb_flange_demo.mp4
-
-> **Video**: `demo_output/camera2_usb_flange_demo.mp4` &mdash; Shows Phase 1 closest-leaf detection, calibration transition, Phase 2 re-identification with parallax math overlay.
-
----
-
-## Project Structure
-
-```
-anubix_ws/
-├── src/
-│   ├── anubix_master/           # AI agent bridge + mission orchestrator
-│   │   ├── anubix_master/
-│   │   │   ├── ros_master_node.py        # Tool callback HTTP server
-│   │   │   └── command_parser.py         # Command parsing utilities
-│   │   ├── config/
-│   │   │   └── master_params.yaml
-│   │   └── launch/
-│   │       └── master.launch.py
-│   │
-│   ├── anubix_vision/           # YOLO leaf detection (CUDA/TensorRT)
-│   │   ├── anubix_vision/
-│   │   │   ├── vision_node.py            # Dual-camera pipeline
-│   │   │   └── leaf_detection.py         # Pure-function detection helpers
-│   │   ├── config/
-│   │   │   └── vision_params.yaml
-│   │   └── launch/
-│   │       └── vision.launch.py
-│   │
-│   ├── anubix_arm/              # Pro 450 arm control + kinematics
-│   │   ├── anubix_arm/
-│   │   │   ├── arm_node.py               # Arm control node
-│   │   │   └── mission.py                # Test runner
-│   │   ├── config/
-│   │   │   └── arm_params.yaml
-│   │   └── launch/
-│   │       └── arm.launch.py
-│   │
-│   ├── anubix_gripper/          # myGripperF100 control
-│   │   ├── anubix_gripper/
-│   │   │   ├── gripper_node.py           # Supervisor + direct interface
-│   │   │   ├── elegripper.py             # Low-level Modbus driver
-│   │   │   └── gripper_sender.py         # Manual command sender
-│   │   ├── config/
-│   │   │   └── gripper_params.yaml
-│   │   └── launch/
-│   │       └── (included via bringup)
-│   │
-│   ├── anubix_spectrometer/     # Si-NIR spectral analysis
-│   │   ├── anubix_spectrometer/
-│   │   │   ├── spectrometer_node.py      # ROS 2 node
-│   │   │   └── spectrometer_driver.py    # Si-NIR TCP driver + ML client
-│   │   ├── config/
-│   │   │   ├── spectrometer_params.yaml
-│   │   │   └── bg.csv                    # Background calibration data
-│   │   └── launch/
-│   │       └── spectrometer.launch.py
-│   │
-│   ├── anubix_navigation/       # Navigation stack
-│   │   ├── anubix_navigation/
-│   │   │   └── nav_node.py               # Vision-standoff navigation
-│   │   ├── config/
-│   │   │   └── nav_params.yaml
-│   │   └── launch/
-│   │       └── navigation.launch.py
-│   │
-│   ├── anubix_supabase/         # Cloud data pipeline
-│   │   ├── anubix_supabase/
-│   │   │   ├── supabase_node.py          # Upload orchestrator
-│   │   │   └── supabase_uploader.py      # Supabase client wrapper
-│   │   ├── config/
-│   │   │   └── supabase_params.yaml
-│   │   └── launch/
-│   │       └── supabase.launch.py
-│   │
-│   ├── anubix_jetson_bridge/    # Cross-machine link monitor
-│   │   ├── anubix_jetson_bridge/
-│   │   │   └── jetson_bridge_node.py
-│   │   ├── config/
-│   │   │   └── jetson_bridge_params.yaml
-│   │   └── launch/
-│   │       └── jetson_bridge.launch.py
-│   │
-│   └── anubix_bringup/          # System launch files
-│       └── launch/
-│           └── jetson.launch.py          # Single-command full launch
-│
-├── agent_config/                # OmniLink AI agent configuration
-│   ├── ANUBIX_AGENT_PROMPT_v3_TOOLCALLS.txt
-│   ├── configure_anubix_agent.py
-│   └── verify_configuration.py
-│
-├── demo_output/                 # Demo videos
-│   ├── camera1_realsense_demo.mp4
-│   └── camera2_usb_flange_demo.mp4
-│
-├── vision_demo.py               # Fully-annotated vision demo generator
-├── TESTING.md                   # Stack-by-stack testing guide
-└── README.md                   # This file
-```
+**Supervised by:** Prof. Lamiaa Elrefaei & Dr. Mai Ahmed Mohamed
 
 ---
 
-## Technical Deep Dives
+## The Journey
 
-### Self-Collision Avoidance (Arm)
+Building ANUBIX was more than a graduation project — it was a year of growing tomatoes in our apartments, transporting plants across Cairo, debugging boot failures with soldered STM32 probes, and collecting thousands of spectral readings one leaf at a time.
 
-The arm node implements a capsule-based self-collision checker using the Pro 450's Modified DH parameters. Each of the 6 links is modeled as a capsule (line segment + radius), and all non-adjacent pairs are checked for intersection:
-
-- **Forward Kinematics**: Computes 7 joint-frame origins from 6 joint angles using the DH chain
-- **Collision Check**: Minimum segment-segment distance across 9 non-adjacent link pairs
-- **IK Selection**: When multiple inverse kinematics solutions exist, the one with the greatest minimum link clearance is preferred
-- **Path Validation**: Joint-space interpolation with 20 intermediate samples to catch mid-path collisions
-
-### Parallax Depth Estimation (Vision)
-
-Camera 2's depth estimation uses a calibration-based parallax technique:
-
-1. **Phase 1**: Identify the target leaf and record its centroid `(cx1, cy1)`
-2. **Calibration Move**: Command the arm to move exactly 1cm in +X
-3. **Phase 2**: Re-identify the same leaf at `(cx2, cy2)` using nearest-centroid matching
-4. **Scale**: `pixels_per_cm = sqrt((cx2-cx1)^2 + (cy2-cy1)^2) / 1.0`
-5. **XY Offset**: `dx_cm = (cx2 - gripper_x) / pixels_per_cm`
-6. **Z Depth**: `depth_cm = (1.0 * pixels_per_cm) / vertical_shift_px`
-
-### Spectrometer Pipeline
-
-The spectral analysis follows the reference `pyConnect` pipeline byte-for-byte:
-
-1. **Hardware Init**: `check_board` &rarr; `set_gain_settings` &rarr; `set_source_settings` &rarr; `read_module_id`
-2. **Acquisition**: 5 scans via `run_psd` (Op 3), each dequantized as `PSD = (i64 / 2^33) * 100`
-3. **Normalization**: `mean(5_scans) / bg.csv`, rounded to 8 decimals
-4. **Classification**: POST 257-point feature vector to remote ML server
-5. **Result**: `"Control with virus"` &rarr; `infected` | `"Control without virus"` &rarr; `healthy`
-
----
-
-## Team
+<div align="center">
 
 <table>
-  <tr>
-    <td align="center">
-      <a href="https://github.com/AbdelrahmanAtef01">
-        <img src="https://github.com/AbdelrahmanAtef01.png" width="100px;" alt=""/>
-        <br />
-        <sub><b>Abdelrahman Atef</b></sub>
-      </a>
-      <br />
-      <sub>Software & System Integration Lead</sub>
-      <br />
-      <sub>Jetson Stack, AI Agent, Vision, Arm Control</sub>
-    </td>
-  </tr>
+<tr>
+<td align="center"><img src="docs/assets/final_demo_1.jpeg" width="350"/><br><em>The day the arm first moved</em></td>
+<td align="center"><img src="docs/assets/final_demo_2.jpeg" width="350"/><br><em>Transporting ANUBIX for testing</em></td>
+</tr>
+<tr>
+<td align="center"><img src="docs/assets/anubix_build_2.jpeg" width="350"/><br><em>Building the mobile base from scratch</em></td>
+<td align="center"><img src="docs/assets/robot_photo_1.jpeg" width="350"/><br><em>Our tomato plants — grown for data collection</em></td>
+</tr>
 </table>
 
-> **Supervised by**: Faculty of Computers and Artificial Intelligence, Cairo University
+</div>
 
 ---
 
 ## Acknowledgments
 
-- **Cairo University** &mdash; Faculty of Computers and Artificial Intelligence, for academic supervision and project guidance
-- **NVIDIA** &mdash; Jetson Orin Nano platform and TensorRT acceleration
-- **Elephant Robotics** &mdash; MyCobot Pro 450 Elite and myGripperF100 hardware
-- **Intel** &mdash; RealSense depth camera SDK
-- **Ultralytics** &mdash; YOLOv8 segmentation framework
-- **OmniLink** &mdash; AI agent platform for natural-language robot control
-- **Supabase** &mdash; Cloud database and storage infrastructure
-- **Open Robotics** &mdash; ROS 2 Humble framework
+This project would not have been possible without:
+
+- **[Si-Ware Systems](https://www.si-ware.com/)** — Co-owner of the project alongside our university. Provided the SI-NIR spectrometer, technical mentorship, and lab access. Special thanks to Dr. Yasser Sabry, Eng. Moez El Massry, and Eng. Shady Reda.
+
+- **[OmniLink Agents](https://omnilink.ai)** — Provided the AI agent infrastructure and cloud inference services that power ANUBIX's cognitive engine. Thanks to Eng. Ahmed Fetouh.
+
+- **Department of Plant Diseases, Faculty of Agriculture, Ain Shams University** — Dr. Medhat Kamel provided essential agricultural mentorship and the plant samples needed for data collection and field testing.
+
+- **Prof. Dr. Lamiaa Elrefaei** — Our project supervisor, whose guidance shaped every aspect of ANUBIX from architecture to execution.
 
 ---
 
-## License
+<div align="center">
 
-This project was developed as a graduation project at the Faculty of Computers and Artificial Intelligence, Cairo University. All rights are reserved to the project team and the university.
+*Built with determination, tomato plants, and way too much coffee.*
 
----
+**Benha University — Shoubra Faculty of Engineering — CCEP Department — Class of 2026**
 
-<p align="center">
-  <sub>Built with determination, caffeine, and a lot of ROS 2 QoS debugging.</sub>
-</p>
+</div>
