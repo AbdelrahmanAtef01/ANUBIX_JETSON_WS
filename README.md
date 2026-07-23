@@ -162,7 +162,7 @@ ANUBIX is built as a distributed ROS 2 system spanning two computers — an **NV
 
 ### 1. The AI Brain — LLM Task Planning
 
-ANUBIX doesn't run a fixed script. A cloud-hosted **Google Gemini** model (via the OmniLink Agents platform) acts as the robot's cognitive engine.
+ANUBIX doesn't run a fixed script. A cloud-hosted **Google Gemini** model (via the OmniLink Agents platform) acts as the robot's cognitive engine. [check it here](https://github.com/AbdelrahmanAtef01/ANUBIX_Server/tree/main).
 
 <div align="center">
 <img src="docs/assets/data_flow.jpeg" alt="End-to-end deployment architecture" width="700"/>
@@ -304,7 +304,7 @@ The ML pipeline was trained on **3,200+ spectral readings** collected by the tea
 
 ### 4. Navigation — Autonomous Greenhouse Traversal
 
-The navigation stack runs on the **Raspberry Pi 4** and solves the SLAM problem in visually repetitive greenhouse environments.
+The navigation stack runs on the **Raspberry Pi 4** and solves the SLAM problem in visually repetitive greenhouse environments. [check it here](https://github.com/AbdelrahmanAtef01/ANUBIX_RASPBERRY_WS)
 
 <div align="center">
 <img src="docs/assets/vision_pipeline.jpeg" alt="Navigation Architecture" width="800"/>
@@ -606,7 +606,7 @@ This project would not have been possible without:
 
 - **[Si-Ware Systems](https://www.si-ware.com/)** — Co-owner of the project alongside our university. Provided the Sponsorship, SI-NIR spectrometer, technical mentorship, and lab access. Special thanks to Dr. Yasser Sabry, Dr. Sherif Okda, Eng. Moez El Massry, and Eng. Shady Reda.
 
-- **[OmniLink Agents](https://omnilink.ai)** — Provided the AI agent infrastructure that power ANUBIX's cognitive engine. Thanks to Eng. Ahmed Fetouh.
+- **[OmniLink Agents](https://www.omnilink-agents.com/)** — Provided the AI agent infrastructure that power ANUBIX's cognitive engine. Thanks to Eng. Ahmed Fetouh.
 
 - **Department of Plant Diseases, Faculty of Agriculture, Ain Shams University** — Dr. Medhat Kamel provided essential agricultural mentorship and the plant samples needed for data collection and field testing.
 
