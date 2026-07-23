@@ -54,6 +54,14 @@ Current agricultural monitoring falls short in three critical ways:
 
 ## Demos
 
+### Full System Demo
+
+<div align="center">
+<img src="docs/assets/demo_full.gif" alt="Full ANUBIX demo — autonomous scan mission" width="640"/>
+
+*End-to-end autonomous mission: the robot navigates to a target zone, locates a leaf through computer vision, extends the robotic arm, grasps the leaf, and performs a spectral scan — all from a single natural language command.*
+</div>
+
 ### RealSense D435i — Wide-Angle Leaf Detection
 
 <div align="center">
@@ -82,14 +90,18 @@ Current agricultural monitoring falls short in three critical ways:
 
 <br>
 
-<div align="center">
-
-| | | |
-|:---:|:---:|:---:|
-| <img src="docs/assets/abdelrahman_atef.jpeg" width="130"/><br>**Abdelrahman Atef**<br>*Team leader, System Architect, AI Agent & Cloud Deployment* | <img src="docs/assets/andrew_ayman.jpeg" width="130"/><br>**Andrew Ayman**<br>*NIR Spectroscopy, ML & Sensor Integration* | <img src="docs/assets/ahmed_abdelwahed.jpeg" width="130"/><br>**Ahmed Abdelwahed**<br>*Navigation & SLAM* |
-| <img src="docs/assets/hanin_sherif.jpeg" width="130"/><br>**Hanin Sherif**<br>*Perception, CV & Edge Deployment* | <img src="docs/assets/hazem_abuelanin.jpeg" width="130"/><br>**Hazem Abuelanin**<br>*Autonomous Navigation & Motion Control* | <img src="docs/assets/mohamed_hany.jpeg" width="130"/><br>**Mohamed Hany**<br>*Arm Control* |
-
-</div>
+<table>
+<tr>
+<td align="center" width="33%"><img src="docs/assets/abdelrahman_atef.jpeg" width="130"/><br><b>Abdelrahman Atef</b><br><em>Team Leader, System Architect, AI Agent & Cloud Deployment</em></td>
+<td align="center" width="33%"><img src="docs/assets/andrew_ayman.jpeg" width="130"/><br><b>Andrew Ayman</b><br><em>NIR Spectroscopy, ML & Sensor Integration</em></td>
+<td align="center" width="33%"><img src="docs/assets/ahmed_abdelwahed.jpeg" width="130"/><br><b>Ahmed Abdelwahed</b><br><em>Navigation & SLAM</em></td>
+</tr>
+<tr>
+<td align="center" width="33%"><img src="docs/assets/hanin_sherif.jpeg" width="130"/><br><b>Hanin Sherif</b><br><em>Perception, CV & Edge Deployment</em></td>
+<td align="center" width="33%"><img src="docs/assets/hazem_abuelanin.jpeg" width="130"/><br><b>Hazem Abuelanin</b><br><em>Autonomous Navigation & Motion Control</em></td>
+<td align="center" width="33%"><img src="docs/assets/mohamed_hany.jpeg" width="130"/><br><b>Mohamed Hany</b><br><em>Arm Control</em></td>
+</tr>
+</table>
 
 **Supervised by:** Prof. Lamiaa Elrefaei
 
@@ -192,9 +204,9 @@ The master node (`ros_master_node.py`) is the single point of contact between th
 ### 2. Perception — Seeing Through the Canopy
 
 <div align="center">
-<img src="docs/assets/camera_workflow_pres.png" alt="Dual-Camera Perception Strategy" width="800"/>
+<img src="docs/assets/vision_model_2.png" alt="YOLOv8 Instance Segmentation — Annotated Dataset Samples" width="800"/>
 
-*The dual-camera perception strategy: Intel RealSense D435i provides wide-angle 3D back-projection, while the USB flange camera performs close-range parallax-based targeting for precise leaf localization.*
+*YOLOv8m-seg instance segmentation on real greenhouse imagery. The model detects and segments four classes — healthy leaves, unhealthy leaves, green tomatoes, and ripened tomatoes — across varied lighting and occlusion conditions.*
 </div>
 
 The vision system uses a **dual-camera strategy** with a single YOLOv8m-seg model shared across both pipelines:
@@ -425,9 +437,9 @@ The Flutter/Supabase web application serves as the primary human-machine interfa
 - Photo gallery from each inspection mission
 
 <div align="center">
-<img src="docs/assets/webapp_ui.png" alt="ANUBIX Web Dashboard" width="700"/>
+<img src="docs/assets/farm_dashboard.png" alt="ANUBIX Farm Monitor Dashboard" width="700"/>
 
-*The Flutter web dashboard showing the control interface*
+*The Flutter web dashboard — Farm Monitor view with interactive crop zone grid, real-time robot position, and natural language command input*
 </div>
 
 ---
