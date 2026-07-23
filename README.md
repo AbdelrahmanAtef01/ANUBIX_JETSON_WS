@@ -94,12 +94,12 @@ Current agricultural monitoring falls short in three critical ways:
 <tr>
 <td align="center" width="33%"><img src="docs/assets/abdelrahman_atef.jpeg" width="130"/><br><b>Abdelrahman Atef</b><br><em>Team Leader, System Architect, AI Agent & Cloud Deployment</em></td>
 <td align="center" width="33%"><img src="docs/assets/andrew_ayman.jpeg" width="130"/><br><b>Andrew Ayman</b><br><em>NIR Spectroscopy, ML & Sensor Integration</em></td>
-<td align="center" width="33%"><img src="docs/assets/ahmed_abdelwahed.jpeg" width="130"/><br><b>Ahmed Abdelwahed</b><br><em>Navigation & SLAM</em></td>
+<td align="center" width="33%"><img src="docs/assets/hanin_sherif.jpeg" width="130"/><br><b>Hanin Sherif</b><br><em>Perception, CV & Edge Deployment</em></td>
 </tr>
 <tr>
-<td align="center" width="33%"><img src="docs/assets/hanin_sherif.jpeg" width="130"/><br><b>Hanin Sherif</b><br><em>Perception, CV & Edge Deployment</em></td>
+<td align="center" width="33%"><img src="docs/assets/ahmed_abdelwahed.jpeg" width="130"/><br><b>Mohamed Hany</b><br><em>Navigation & SLAM</em></td>
 <td align="center" width="33%"><img src="docs/assets/hazem_abuelanin.jpeg" width="130"/><br><b>Hazem Abuelanin</b><br><em>Autonomous Navigation & Motion Control</em></td>
-<td align="center" width="33%"><img src="docs/assets/mohamed_hany.jpeg" width="130"/><br><b>Mohamed Hany</b><br><em>Arm Control</em></td>
+<td align="center" width="33%"><img src="docs/assets/mohamed_hany.jpeg" width="130"/><br><b>Ahmed Abdelwahed</b><br><em>Arm Control</em></td>
 </tr>
 </table>
 
