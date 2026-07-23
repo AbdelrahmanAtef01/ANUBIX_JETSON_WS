@@ -1,16 +1,16 @@
 <div align="center">
 
-<img src="docs/assets/anubix_hero.png" alt="ANUBIX Robot" width="500"/>
-
 # ANUBIX
-
 ### Autonomous Robot for Early-Stage Agricultural Disease Detection
 
 **Detecting crop diseases *before* visual symptoms appear — using spectroscopy, AI, and robotics.**
 
-*Graduation Project — Benha University, Shoubra Faculty of Engineering*
-*Communications & Computer Engineering Program (CCEP)*
+*Graduation Project — in collaboration with SI-Ware Systems,*
+*Benha University, Shoubra Faculty of Engineering*
+*Communications & Computer Engineering Program (CCEP),*
 *June 2026*
+
+<img src="docs/assets/anubix_hero.png" alt="ANUBIX Robot" width="500"/>
 
 [![ROS 2](https://img.shields.io/badge/ROS_2-Humble-blue?logo=ros)](https://docs.ros.org/en/humble/)
 [![Platform](https://img.shields.io/badge/Platform-Jetson_Orin_Nano-green?logo=nvidia)](https://developer.nvidia.com/embedded/jetson-orin-nano)
@@ -28,7 +28,7 @@ Plant diseases spread silently. By the time a farmer sees yellowing leaves or wi
 
 **ANUBIX changes that.** It's an autonomous mobile robot that can detect crop diseases *before any visible symptoms appear*. Instead of relying on cameras to spot what the human eye can already see, ANUBIX uses **near-infrared (NIR) spectroscopy** to look *inside* the plant tissue and catch the invisible biochemical markers of infection.
 
-A farmer simply types a command — in Arabic or English — like *"Scan the tomatoes in Aisle 3"*, and ANUBIX handles everything autonomously: navigating to the target, identifying leaves through dense foliage, gently grasping them with a robotic arm, and performing a spectral scan that reveals whether the plant is healthy or carrying a hidden infection.
+A farmer simply types a command on his dashboard — in Arabic or English — like *"Scan the tomatoes in Aisle 3"*, and ANUBIX handles everything autonomously: navigating to the target, identifying leaves through dense foliage, gently grasping them with a robotic arm, and performing a spectral scan that reveals whether the plant is healthy or carrying a hidden infection.
 
 <div align="center">
 <img src="docs/assets/robot_real_3.jpeg" alt="Team collecting spectral data at Si-Ware Systems" width="700"/>
@@ -69,6 +69,29 @@ Current agricultural monitoring falls short in three critical ways:
 
 *The end-effector-mounted monocular camera performs a 1 cm calibration displacement to derive depth via parallax. After the RealSense provides a coarse position, the flange camera re-detects the target leaf at close range, computes a 3D correction vector (dx, dy, depth), and guides the arm to its final grip position.*
 </div>
+
+---
+
+## The Team
+
+<div align="center">
+<img src="docs/assets/squad_photo_1.jpeg" alt="The ANUBIX Team" width="700"/>
+
+*The ANUBIX squad during one of many late-night sessions*
+</div>
+
+<br>
+
+<div align="center">
+
+| | | |
+|:---:|:---:|:---:|
+| <img src="docs/assets/abdelrahman_atef.jpeg" width="130"/><br>**Abdelrahman Atef**<br>*Team leader, System Architect, AI Agent & Cloud Deployment* | <img src="docs/assets/andrew_ayman.jpeg" width="130"/><br>**Andrew Ayman**<br>*NIR Spectroscopy, ML & Sensor Integration* | <img src="docs/assets/ahmed_abdelwahed.jpeg" width="130"/><br>**Ahmed Abdelwahed**<br>*Navigation & SLAM* |
+| <img src="docs/assets/hanin_sherif.jpeg" width="130"/><br>**Hanin Sherif**<br>*Perception, CV & Edge Deployment* | <img src="docs/assets/hazem_abuelanin.jpeg" width="130"/><br>**Hazem Abuelanin**<br>*Autonomous Navigation & Motion Control* | <img src="docs/assets/mohamed_hany.jpeg" width="130"/><br>**Mohamed Hany**<br>*Arm Control* |
+
+</div>
+
+**Supervised by:** Prof. Lamiaa Elrefaei
 
 ---
 
@@ -123,34 +146,11 @@ ANUBIX is built as a distributed ROS 2 system spanning two computers — an **NV
 
 ---
 
-## The Team
-
-<div align="center">
-<img src="docs/assets/squad_photo_1.jpeg" alt="The ANUBIX Team" width="700"/>
-
-*The ANUBIX squad during one of many late-night sessions*
-</div>
-
-<br>
-
-<div align="center">
-
-| | | |
-|:---:|:---:|:---:|
-| <img src="docs/assets/abdelrahman_atef.jpeg" width="130"/><br>**Abdelrahman Atef**<br>*AI Agent & Cloud* | <img src="docs/assets/andrew_ayman.jpeg" width="130"/><br>**Andrew Ayman**<br>*Arm Control & Kinematics* | <img src="docs/assets/ahmed_abdelwahed.jpeg" width="130"/><br>**Ahmed Abdelwahed**<br>*Navigation & SLAM* |
-| <img src="docs/assets/hanin_sherif.jpeg" width="130"/><br>**Hanin Sherif**<br>*Spectroscopy & ML* | <img src="docs/assets/hazem_abuelanin.jpeg" width="130"/><br>**Hazem Abuelanin**<br>*Perception & Vision* | <img src="docs/assets/mohamed_hany.jpeg" width="130"/><br>**Mohamed Hany**<br>*Embedded Systems & ESP32* |
-
-</div>
-
-**Supervised by:** Prof. Lamiaa Elrefaei & Dr. Mai Ahmed Mohamed
-
----
-
 ## Technology Deep Dive
 
 ### 1. The AI Brain — LLM Task Planning
 
-ANUBIX doesn't run a fixed script. A cloud-hosted **Google Gemini** model (via the OmniLink Agents platform, temperature=0.1, maxToolRounds=1000) acts as the robot's cognitive engine.
+ANUBIX doesn't run a fixed script. A cloud-hosted **Google Gemini** model (via the OmniLink Agents platform) acts as the robot's cognitive engine.
 
 <div align="center">
 <img src="docs/assets/data_flow.jpeg" alt="End-to-end deployment architecture" width="700"/>
@@ -368,8 +368,8 @@ Multi-phase trajectories with phase discriminators:
 <div align="center">
 <table>
 <tr>
-<td align="center"><img src="docs/assets/hardware_design.png" width="400"/><br><em>The custom mobile base with LIDAR, RealSense, and ANUBIX branding</em></td>
-<td align="center"><img src="docs/assets/anubix_build_1.jpeg" width="400"/><br><em>Early build with the robotic arm integrated</em></td>
+<td align="center"><img src="docs/assets/hardware_design.png" width="400"/><br><em>The custom mobile base</em></td>
+<td align="center"><img src="docs/assets/anubix_build_1.jpeg" width="400"/><br><em>Early built ANUBIX</em></td>
 </tr>
 </table>
 </div>
@@ -565,7 +565,7 @@ Key parameters in `src/anubix_master/config/master_params.yaml`:
 
 ## The Journey
 
-Building ANUBIX was more than a graduation project — it was a year of growing tomatoes in our apartments, transporting plants across Cairo, debugging Jetson boot failures with soldered STM32 serial probes, and collecting thousands of spectral readings one leaf at a time.
+Building ANUBIX was more than a graduation project — it was a year of growing lab tomatoes in our apartments, transporting plants across Cairo, debugging Jetson boot failures with soldered STM32 serial probes, and collecting thousands of spectral readings one leaf at a time.
 
 <div align="center">
 
@@ -592,9 +592,9 @@ Building ANUBIX was more than a graduation project — it was a year of growing 
 
 This project would not have been possible without:
 
-- **[Si-Ware Systems](https://www.si-ware.com/)** — Co-owner of the project alongside our university. Provided the SI-NIR spectrometer, technical mentorship, and lab access. Special thanks to Dr. Yasser Sabry, Eng. Moez El Massry, and Eng. Shady Reda.
+- **[Si-Ware Systems](https://www.si-ware.com/)** — Co-owner of the project alongside our university. Provided the Sponsorship, SI-NIR spectrometer, technical mentorship, and lab access. Special thanks to Dr. Yasser Sabry, Dr. Sherif Okda, Eng. Moez El Massry, and Eng. Shady Reda.
 
-- **[OmniLink Agents](https://omnilink.ai)** — Provided the AI agent infrastructure and cloud inference services that power ANUBIX's cognitive engine. Thanks to Eng. Ahmed Fetouh.
+- **[OmniLink Agents](https://omnilink.ai)** — Provided the AI agent infrastructure that power ANUBIX's cognitive engine. Thanks to Eng. Ahmed Fetouh.
 
 - **Department of Plant Diseases, Faculty of Agriculture, Ain Shams University** — Dr. Medhat Kamel provided essential agricultural mentorship and the plant samples needed for data collection and field testing.
 
