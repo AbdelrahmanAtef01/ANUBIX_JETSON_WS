@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/anubix_logo_1.png" alt="ANUBIX Robot" width="500"/>
+<img src="docs/assets/anubix_hero.png" alt="ANUBIX Robot" width="500"/>
 
 # ANUBIX
 
@@ -123,6 +123,29 @@ ANUBIX is built as a distributed ROS 2 system spanning two computers — an **NV
 
 ---
 
+## The Team
+
+<div align="center">
+<img src="docs/assets/squad_photo_1.jpeg" alt="The ANUBIX Team" width="700"/>
+
+*The ANUBIX squad during one of many late-night sessions*
+</div>
+
+<br>
+
+<div align="center">
+
+| | | |
+|:---:|:---:|:---:|
+| <img src="docs/assets/abdelrahman_atef.jpeg" width="130"/><br>**Abdelrahman Atef**<br>*AI Agent & Cloud* | <img src="docs/assets/andrew_ayman.jpeg" width="130"/><br>**Andrew Ayman**<br>*Arm Control & Kinematics* | <img src="docs/assets/ahmed_abdelwahed.jpeg" width="130"/><br>**Ahmed Abdelwahed**<br>*Navigation & SLAM* |
+| <img src="docs/assets/hanin_sherif.jpeg" width="130"/><br>**Hanin Sherif**<br>*Spectroscopy & ML* | <img src="docs/assets/hazem_abuelanin.jpeg" width="130"/><br>**Hazem Abuelanin**<br>*Perception & Vision* | <img src="docs/assets/mohamed_hany.jpeg" width="130"/><br>**Mohamed Hany**<br>*Embedded Systems & ESP32* |
+
+</div>
+
+**Supervised by:** Prof. Lamiaa Elrefaei & Dr. Mai Ahmed Mohamed
+
+---
+
 ## Technology Deep Dive
 
 ### 1. The AI Brain — LLM Task Planning
@@ -169,9 +192,9 @@ The master node (`ros_master_node.py`) is the single point of contact between th
 ### 2. Perception — Seeing Through the Canopy
 
 <div align="center">
-<img src="docs/assets/camera_workflow.jpeg" alt="SLAM and Navigation Pipeline" width="800"/>
+<img src="docs/assets/camera_workflow_pres.png" alt="Dual-Camera Perception Strategy" width="800"/>
 
-*The full SLAM pipeline: RPLiDAR A1 + ESP32 wheel encoders + IMU feed into SLAM Toolbox for mapping, with EKF sensor fusion and TF tree management.*
+*The dual-camera perception strategy: Intel RealSense D435i provides wide-angle 3D back-projection, while the USB flange camera performs close-range parallax-based targeting for precise leaf localization.*
 </div>
 
 The vision system uses a **dual-camera strategy** with a single YOLOv8m-seg model shared across both pipelines:
@@ -402,7 +425,7 @@ The Flutter/Supabase web application serves as the primary human-machine interfa
 - Photo gallery from each inspection mission
 
 <div align="center">
-<img src="docs/assets/app_dashboard.png" alt="ANUBIX Web Dashboard" width="700"/>
+<img src="docs/assets/webapp_ui.png" alt="ANUBIX Web Dashboard" width="700"/>
 
 *The Flutter web dashboard showing the control interface*
 </div>
@@ -537,29 +560,6 @@ Key parameters in `src/anubix_master/config/master_params.yaml`:
 - `tool_server_port`: HTTP server port for AI agent tool calls (default: 5050)
 - `nav_standoff_distance`: Distance to stop short when vision mode is active (default: 1.0m)
 - `arm_timeout`: Maximum wait time for arm movements (default: 120s)
-
----
-
-## The Team
-
-<div align="center">
-<img src="docs/assets/squad_photo_1.jpeg" alt="The ANUBIX Team" width="700"/>
-
-*The ANUBIX squad during one of many late-night sessions*
-</div>
-
-<br>
-
-<div align="center">
-
-| | | |
-|:---:|:---:|:---:|
-| **Abdelrahman Atef** | **Andrew Ayman** | **Ahmed Abdelwahed** |
-| **Hanin Sherif** | **Hazem Abuelanin** | **Mohamed Hany** |
-
-</div>
-
-**Supervised by:** Prof. Lamiaa Elrefaei & Dr. Mai Ahmed Mohamed
 
 ---
 
