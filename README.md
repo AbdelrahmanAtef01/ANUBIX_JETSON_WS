@@ -97,9 +97,9 @@ Current agricultural monitoring falls short in three critical ways:
 <td align="center" width="33%"><img src="docs/assets/hanin_sherif.jpeg" width="130"/><br><b>Hanin Sherif</b><br><em>Perception, CV & Edge Deployment</em></td>
 </tr>
 <tr>
-<td align="center" width="33%"><img src="docs/assets/ahmed_abdelwahed.jpeg" width="130"/><br><b>Mohamed Hany</b><br><em>Navigation & SLAM</em></td>
+<td align="center" width="33%"><img src="docs/assets/ahmed_abdelwahed.jpeg" width="130"/><br><b>Mohamed Hany</b><br><em>Arm Control</em></td>
 <td align="center" width="33%"><img src="docs/assets/hazem_abuelanin.jpeg" width="130"/><br><b>Hazem Abuelanin</b><br><em>Autonomous Navigation & Motion Control</em></td>
-<td align="center" width="33%"><img src="docs/assets/mohamed_hany.jpeg" width="130"/><br><b>Ahmed Abdelwahed</b><br><em>Arm Control</em></td>
+<td align="center" width="33%"><img src="docs/assets/mohamed_hany.jpeg" width="130"/><br><b>Ahmed Abdelwahed</b><br><em>Backend & Flutter</em></td>
 </tr>
 </table>
 
@@ -318,12 +318,6 @@ The navigation stack runs on the **Raspberry Pi 4** and solves the SLAM problem 
 - **Sensor Fusion**: RPLiDAR A1 (`sensor_msgs/LaserScan`) + ESP32 wheel encoders + IMU, fused via EKF (`robot_localization`)
 - **AMCL**: Adaptive Monte Carlo Localization with particle filter for runtime pose estimation
 - **Output**: Occupancy grid map (`.pgm` + `.yaml`) and optimized pose graph
-
-<div align="center">
-<img src="docs/assets/slam_map.jpeg" alt="SLAM-generated occupancy grid map" width="350"/>
-
-*SLAM-generated occupancy grid map of the test environment*
-</div>
 
 #### Autonomous Navigation (Nav2)
 
